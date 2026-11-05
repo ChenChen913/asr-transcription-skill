@@ -17,7 +17,7 @@
 | `temperature` | `0.0 / 0.2 / 0.4` | 是**段内**按重复率 / 置信度阈值逐级降级，不是整次转写失败后重跑 |
 | `word_timestamps` | `False`（默认） | 只给段级起止时间；设 `True` 才输出词级，速度更慢、占用更高，非必要不开 |
 | `device` / `compute_type` | `cuda` / `float16` | 有卡就一定用 GPU |
-| 回退 | `cpu` / `int8` / `cpu_threads=8` | 写进 `try/except Exception`，见下 |
+| 回退 | `cpu` / `int8` / `cpu_threads=8` | 只在**确属 GPU 错误**时回退，见下 |
 
 ### 3.1 关于 `initial_prompt`
 
@@ -36,30 +36,48 @@
 
 1. 确认两个 pip 组件已装（`nvidia-cublas-cu12`、`nvidia-cudnn-cu12`），DLL 通常在**用户级** site-packages 的 `nvidia\cublas\bin`、`nvidia\cudnn\bin`。
 2. **在创建 / 推理 WhisperModel 之前**，对每个 bin 目录执行 `os.add_dll_directory(目录)`，并把目录前插进 `os.environ['PATH']`。
+   - **必须保留 `os.add_dll_directory()` 的返回值**：它返回一个句柄对象，句柄被回收（不接收返回值时会立刻回收）就等于把目录从搜索路径里移除。正确写法是 `handles.append(os.add_dll_directory(d))`，让句柄活到进程结束。
+   - 两套机制要**并存**，不是二选一：句柄管 `LoadLibraryEx` 的 `LOAD_LIBRARY_SEARCH_*` 查找，`PATH` 管传统的按名查找（CTranslate2 在 Windows 上走的是后者）。实测本机只保留 `PATH` 也跑得通，但换依赖/换版本就可能只剩句柄那条路。
 3. 真实要求是「**加载模型之前**」，不是字面意义的「任何 import 之前」——放在 `import faster_whisper` 之后也照样能跑通。
 4. 显卡驱动只提供 CUDA 运行时，**算子库来自这两个 pip 包**，别只装驱动。
 
-### 3.3 一定要写回退
+### 3.3 回退要收窄，不要包住一切
 
 ```python
+GPU_HINTS = ("cuda", "cublas", "cudnn", "cudart", "nvml",
+             "no kernel image", "out of memory", "gpu")
+
+def looks_like_gpu_failure(e):
+    msg = ("%s %s" % (type(e).__name__, e)).lower()
+    return any(h in msg for h in GPU_HINTS)
+
 try:
-    segments, info = model.transcribe(...)
-    segs = list(segments)          # 强制消费生成器，让异常在这里抛出
-except Exception as e:             # 不要写裸 except:
-    model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=8)
-    segments, info = model.transcribe(...)
-    segs = list(segments)
+    segs, info, load_s, asr_s = run_once(device="cuda")   # 建模型与推理分开计时
+except Exception as e:
+    if not looks_like_gpu_failure(e):
+        raise                                            # 模型坏/音频坏/参数错：直接报
+    gpu_error = "%s: %s" % (type(e).__name__, e)
+    try:
+        segs, info, load_s, asr_s = run_once(device="cpu")
+    except Exception as e2:
+        raise RuntimeError("both failed\n  GPU: %s\n  CPU: %s" % (gpu_error, e2))
 ```
 
-> 回退后把**实际使用的设备**写进输出，别让 JSON 里还记着 `cuda`。
+为什么不能 `except Exception` 一把包住：
 
-**用 `scripts/transcribe.py` 时**：默认 `--device cuda`，在**构造模型或推理**任一阶段抛异常就自动改 `cpu / int8` 重跑，CPU 再失败才真正报错。
+- 模型文件损坏 / 版本不符 → 换 CPU 同样报 `Unsupported model binary version`，只是多等一遍，还把真正的错误刷到后面；
+- 音频解不出、参数不合法 → 与设备无关，回退纯属浪费；
+- 两个异常都丢掉的话，批量跑只剩一句「CPU 也失败」，没法定位。
+
+**用 `scripts/transcribe.py` 时**：默认 `--device cuda`，只有命中上面那组关键字才改 `cpu / int8` 重跑；`--no-fallback` 可完全禁用回退（排查显卡问题时用）。退出码：`0` 成功｜`2` 输入或模型目录不可用｜`3` 当前设备失败且未回退｜`4` GPU 与 CPU 都失败。
 
 | 想知道什么 | 看输出 JSON 的哪里 |
 |---|---|
 | 实际跑在哪个设备 | `device` 字段（`cuda` / `cpu`）——**不要只看命令行 `--device` 入参** |
 | 有没有发生过回退 | `fallback` 字段，非空即回退过，内容是原始异常摘要 |
-| 速度差多少 | `rtf_x`：GPU 约 19×，CPU 约 2.6–2.9× |
+| 回退前那次尝试加载了多久 | `fallback_load_s`：失败那次已完成的模型加载耗时；加载阶段就失败则为 `null` |
+| 加载 / 推理各多久 | `load_s` 与 `asr_s` **只描述最终成功的设备**；`asr_s` 是纯推理，**不含模型加载** |
+| 速度差多少 | `rtf_x = duration / asr_s`：GPU 约 19×，CPU 约 2.6–2.9× |
 
 显式只要 CPU：`--device cpu --compute int8`。DLL 文件在磁盘上 ≠ 能加载，环境自检通过后仍要真跑一句推理确认。
 

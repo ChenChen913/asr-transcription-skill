@@ -91,14 +91,14 @@ agent_created: true
 - 不改原始输出；重跑写新目录；每个数字标出处，推测标推测。
 - 现成环境先自检再决定是否安装，别重复下载模型。
 - 关闭 `initial_prompt` 会让标点密度几乎归零，不要关；`word_timestamps` 默认 `False`，输出只有段级起止时间。
-- `qc_check.py` 分两级：**ERROR** = 确定的数据/格式错误（必须修输入），**RED/REVIEW** = 需人工复核的风险信号（不等于判错）。两者在文本与 `--json` 模式都返回退出码 1；阈值严格大于（`gap > 8.00 s`、`overrun > 0.50 s`），等于阈值不触发。
+- `qc_check.py` 分两级：**ERROR** = 确定的数据/格式错误（含 `NaN`/`Infinity` 等非有限数值，必须修输入），**RED/REVIEW** = 需人工复核的风险信号（不等于判错）。两者在文本与 `--json` 模式都返回退出码 1；阈值严格大于（`gap > 8.00 s`、`overrun > 0.50 s`），等于阈值不触发。
 - 四个数字指标全过也不能替代三查；RED 只说明「去看一眼」。
 
 ## 可执行脚本
 
-- `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD，GPU 失败自动回退 CPU；产物可直接喂给 qc_check。读输出里的 `device` 字段判断实际用的设备，别只看命令行入参。
+- `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD；仅当错误确属 GPU/CUDA 时才回退 CPU（模型坏、音频坏直接报错，`--no-fallback` 可禁用回退）；产物可直接喂给 qc_check。读输出里的 `device` 字段判断实际用的设备，别只看命令行入参。
 - `scripts/check_env.py`：只读环境自检，输出版本、显卡、CUDA DLL 文件、磁盘、模型目录状态。
-- `scripts/qc_check.py`：输入校验（ERROR）+ 四项粗筛 + 三查硬规则（RED/REVIEW）；无真实时间戳的输入明确标 N/A；duration 无效时明确报「无法检查」。
-- `tests/run_smoke.py`：零依赖回归测试，26 类输入 × 文本/JSON 两种模式，666 条断言，不需要网络 / 模型 / GPU。
+- `scripts/qc_check.py`：输入校验（ERROR）+ 四项粗筛 + 三查硬规则（RED/REVIEW）；无真实时间戳或时间戳无效时时间类指标为 `null` 并标 N/A，duration 无效时明确报「无法检查」；`--json` 始终是严格 JSON。
+- `tests/run_smoke.py`：零依赖回归测试，33 类输入 × 文本/JSON 两种模式，863 条断言；`tests/run_transcribe_unit.py`：回退决策与耗时口径单测，35 条断言。都不需要网络 / 模型 / GPU。
 
 > 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测配置与已验证范围见 `README.md`。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。版本规划见 `ROADMAP.md`。

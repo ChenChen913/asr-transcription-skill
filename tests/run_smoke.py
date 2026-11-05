@@ -114,6 +114,39 @@ CASES = [
     ("not_found", "missing file must be non-zero exit",
      None, 1, "ERROR", ["file not found"], []),
 
+    # ---- P0: non-finite numbers must never pass as OK ----
+    ("dur_nan", "NaN duration used to return status OK with exit 0",
+     {"duration": float("nan"), "timestamps": True,
+      "segments": [seg(0, 5, "正文内容足够长的一句话。")]},
+     1, "ERROR", ["duration not finite"], ["Traceback"]),
+    ("dur_inf", "infinite duration used to emit inf metrics and pass",
+     {"duration": float("inf"), "timestamps": True,
+      "segments": [seg(0, 5, "正文内容足够长的一句话。")]},
+     1, "ERROR", ["duration not finite"], ["Traceback"]),
+    ("dur_neg_inf", "-Infinity duration",
+     {"duration": float("-inf"), "timestamps": True,
+      "segments": [seg(0, 5, "正文内容足够长的一句话。")]},
+     1, "ERROR", ["duration not finite"], []),
+    ("start_nan", "NaN segment start used to pass as OK with fake gap metrics",
+     {"duration": 60.0, "timestamps": True,
+      "segments": [seg(float("nan"), 5, "正文内容够长的一句话。"),
+                   seg(6, 9, "后续内容也够长。")]},
+     1, "ERROR", ["start not finite"], ["Traceback"]),
+    ("mid_start_nan", "NaN in the middle used to leak NaN into --json output",
+     {"duration": 60.0, "timestamps": True,
+      "segments": [seg(0, 3, "甲乙丙丁戊己庚辛。"),
+                   seg(float("nan"), 5, "壬癸子丑寅卯辰。"),
+                   seg(8.5, 10, "巳午未申酉戌亥。")]},
+     1, "ERROR", ["start not finite"], ["Traceback"]),
+    ("end_inf", "Infinity end used to be REVIEW with '+infs' instead of ERROR",
+     {"duration": 60.0, "timestamps": True,
+      "segments": [seg(0, float("inf"), "正文内容够长的一句话。")]},
+     1, "ERROR", ["end not finite"], ["TAIL OVERRUN"]),
+    ("huge_int", "int beyond float range must give a field error, not OverflowError",
+     {"duration": 10 ** 400,
+      "segments": [seg(0, 5, "正文内容足够长的一句话。")]},
+     1, "ERROR", ["not finite"], ["OverflowError"]),
+
     # ---- P0: REVIEW signals (risk, not proven error) ----
     ("overlap", "adjacent segments overlap -> ask a human, do not call it a bug",
      {"duration": 60, "segments": [seg(0, 10, "前"), seg(8, 20, "后")]},
@@ -143,6 +176,16 @@ def run(path, json_mode=False):
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                        errors="replace")
     return r.returncode, r.stdout + r.stderr
+
+
+def _reject_constant(token):
+    """json.loads accepts NaN/Infinity by default; strict JSON does not."""
+    raise ValueError("non-standard JSON constant: " + token)
+
+
+# Cases whose timestamp fields are unusable: no time metric may be reported.
+TS_INVALID_CASES = ("start_nan", "mid_start_nan", "end_inf",
+                    "missing_start", "non_numeric")
 
 
 def main():
@@ -177,7 +220,7 @@ def main():
                     assert_that(kw not in out, "%s false positive %r" % (tag, kw))
                 if mode:
                     try:
-                        rows = json.loads(out)
+                        rows = json.loads(out, parse_constant=_reject_constant)
                         row = rows[0]
                         assert_that(row.get("status") == exp_status,
                                     "%s status=%r expected=%r"
@@ -190,6 +233,13 @@ def main():
                         if exp_status == "REVIEW":
                             assert_that(len(row.get("red", [])) > 0,
                                         "%s REVIEW must carry red[]" % tag)
+                        if name in TS_INVALID_CASES:
+                            assert_that(row.get("max_gap_s") is None
+                                        and row.get("tail_gap_s") is None
+                                        and row.get("tail_overrun_s") is None,
+                                        "%s time metrics must be null, not fabricated" % tag)
+                            assert_that(row.get("has_timestamps") is False,
+                                        "%s has_timestamps must be False" % tag)
                         if name == "no_timestamps":
                             assert_that(row.get("max_gap_s") is None
                                         and row.get("tail_overrun_s") is None,

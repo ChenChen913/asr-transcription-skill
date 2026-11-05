@@ -37,13 +37,15 @@
 
 | 级别 | JSON 字段 | 文本标记 | 含义 | 典型触发 |
 |---|---|---|---|---|
-| **ERROR** | `errors` | `[ERROR]` | 确定的输入数据/格式错误，**先修数据或产出脚本** | 字段缺失、时间戳非数字、负起点、`end < start`、乱序、`segments` 类型错或为空、duration 缺失/为 0、JSON 无法解析、文件不存在 |
+| **ERROR** | `errors` | `[ERROR]` | 确定的输入数据/格式错误，**先修数据或产出脚本** | 字段缺失、时间戳非数字或 **NaN/Infinity**、超出 float 范围的整数、负起点、`end < start`、乱序、`segments` 类型错或为空、duration 缺失/为 0/非有限、JSON 无法解析、文件不存在 |
 | **RED / REVIEW** | `red` | `[RED/REVIEW]` | 需人工复核的风险信号，**不等于判错** | 段重叠、空文本、尾段越界、长间隙、提示语回音、片尾话术、无真实时间戳 |
 | `warn` | `warn` | `[warn]` | 粗筛指标越界，仅供参考 | 字符密度、段数、尾部空 |
 
 - 每份结果另有 `status`：`OK` / `REVIEW` / `ERROR`。有 ERROR 或 RED 时，文本与 `--json` 模式都返回**退出码 1**，可直接接 CI；退出码 0 只代表「无需复核」，不代表稿子正确。
 - **阈值严格大于，等于不触发**：长间隙 `gap > 8.00 s`（8.00 不报、8.01 报）、尾段越界 `overrun > 0.50 s`（0.40 不报、0.60 报）、段重叠 `> 0.001 s`（仅 REVIEW，实测 6682 个相邻段对中重叠为 0）。可用 `--gap` / `--tail` 调整前两个阈值。
 - `duration` 缺失或 ≤ 0 时，所有依赖它的检查**不跑**，结果明确写「无法检查 / cannot check」，相关指标为 `null` 而不是误导性的 `0.00`。
+- **任一时间戳无效时同理**：`max_gap_s` / `tail_gap_s` / `tail_overrun_s` 一律 `null`，`note` 写 `INVALID TIMESTAMPS`。占位值只用来保住文本，绝不参与统计——否则「段起点缺失」这种 ERROR 旁边会同时出现一组看着很正常的 `maxgap=1.00 tail=1.00`，被人当真实值引用。
+- **非有限数值必须判 ERROR**：`NaN`、`+Infinity`、`-Infinity` 能通过普通类型判断，参与比较时全返回 `False`，足以让一份坏输入拿到 `status=OK` 和退出码 0；`duration=Infinity` 还会产出 `tail=inf / overrun=-inf` 这种假指标。`--json` 出口另有兜底：非有限值一律转 `null` 并用 `allow_nan=False` 序列化，保证输出是**严格 JSON**（默认的 `json.dumps` 会写 `NaN`，jq / JS / Go 直接解析失败）。
 - 结尾按**时间窗口**（最后 30 秒）判定，不是固定「最后两段」——只有两段的长稿里，取最后两段会把开头内容误当片尾话术。
 - 保留旧键 `error` / `red` / `warn` / `duration` / `has_timestamps` 等，新增 `status` / `errors` / `thresholds` 是附加字段；外部调用方升级时不会破接口。
 

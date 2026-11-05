@@ -2,7 +2,13 @@
 """Transcribe one 16 kHz mono WAV into the JSON/MD schema consumed by qc_check.py.
 
 Reads only the input WAV and model directory; writes one .json and one .md.
-GPU failure automatically falls back to CPU int8 and records the device actually used.
+A CUDA failure falls back to CPU int8 only when the error is actually GPU
+related (cuda / cublas / cudnn / nvml / out of memory / ...). Broken input,
+broken model files and bad parameters fail fast with the original error instead
+of being retried on CPU. The device actually used is recorded in the output.
+
+Exit codes: 0 ok | 2 unusable input/model | 3 failed on requested device |
+4 both GPU and CPU attempts failed.
 
 Example:
   python scripts/transcribe.py --wav audio/S1.wav \
@@ -19,6 +25,17 @@ import unicodedata
 import wave
 
 DEFAULT_PROMPT = "以下是普通话的句子，请使用简体中文，并加上标点符号。"
+
+# A substring match on "type name + message". Deliberately tight: falling back
+# to CPU never fixes a missing model file or an undecodable WAV, it only doubles
+# the wait and buries the real error.
+GPU_ERROR_HINTS = ("cuda", "cublas", "cudnn", "cudart", "nvml",
+                   "no kernel image", "out of memory", "gpu")
+
+# os.add_dll_directory() returns a handle whose close() removes the directory
+# again. Dropping the return value closes it immediately, so the directories
+# must be kept alive for the whole process.
+_DLL_HANDLES = []
 
 
 def cuda_dll_dirs():
@@ -41,14 +58,24 @@ def cuda_dll_dirs():
 
 
 def prepare_cuda_dlls():
+    """Make nvidia pip DLLs findable and KEEP the directory handles alive.
+
+    Two mechanisms are kept on purpose: the handle covers LoadLibraryEx with
+    LOAD_LIBRARY_SEARCH_* flags, PATH covers plain LoadLibrary lookups
+    (ctranslate2 uses the latter on Windows, so removing PATH is not an option).
+    """
     found = []
+    path_parts = os.environ.get("PATH", "").split(os.pathsep)
     for d in cuda_dll_dirs():
         if hasattr(os, "add_dll_directory"):
             try:
-                os.add_dll_directory(d)
-            except Exception:
-                pass
-        os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+                _DLL_HANDLES.append(os.add_dll_directory(d))
+            except OSError as e:
+                print("warn: add_dll_directory failed for %s: %s" % (d, e),
+                      file=sys.stderr)
+        if d not in path_parts:
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            path_parts.insert(0, d)
         found.append(d)
     return found
 
@@ -56,6 +83,20 @@ def prepare_cuda_dlls():
 def wav_duration(path):
     with wave.open(path, "rb") as f:
         return f.getnframes() / float(f.getframerate())
+
+
+def read_duration(path):
+    """Fail fast with a readable message instead of a traceback."""
+    try:
+        duration = wav_duration(path)
+    except Exception as e:
+        print("cannot read WAV %s: %s: %s" % (path, type(e).__name__, e),
+              file=sys.stderr)
+        sys.exit(2)
+    if duration <= 0:
+        print("WAV has zero length: %s" % path, file=sys.stderr)
+        sys.exit(2)
+    return duration
 
 
 def punct_per_100(text):
@@ -87,6 +128,26 @@ def transcribe(model, wav, a, prompt):
     return segs, info
 
 
+def looks_like_gpu_failure(e):
+    msg = ("%s %s" % (type(e).__name__, e)).lower()
+    return any(h in msg for h in GPU_ERROR_HINTS)
+
+
+def run_attempt(model_dir, wav, a, prompt, device, compute, timings):
+    """One full attempt; timings captures each stage that actually completed.
+
+    Keeping the two stages apart is what makes asr_s a pure inference number:
+    a fallback must not hide the CPU model load inside the real-time factor.
+    """
+    t0 = time.time()
+    model = build_model(model_dir, device, compute, a.cpu_threads)
+    timings["load_s"] = round(time.time() - t0, 2)
+    t1 = time.time()
+    segs, info = transcribe(model, wav, a, prompt)
+    timings["asr_s"] = round(time.time() - t1, 2)
+    return segs, info
+
+
 def main():
     ap = argparse.ArgumentParser(description="Transcribe one WAV into qc_check-compatible JSON + MD")
     ap.add_argument("--wav", required=True)
@@ -103,35 +164,52 @@ def main():
     ap.add_argument("--hallucination-silence-threshold", type=float, default=None)
     ap.add_argument("--word-timestamps", action="store_true")
     ap.add_argument("--cpu-threads", type=int, default=8)
+    ap.add_argument("--no-fallback", action="store_true",
+                    help="never retry on CPU; report the CUDA error as-is")
     a = ap.parse_args()
 
     if not os.path.isfile(a.wav):
-        sys.exit("WAV not found: " + a.wav)
+        print("WAV not found: " + a.wav, file=sys.stderr)
+        sys.exit(2)
     if not os.path.isfile(os.path.join(a.model, "model.bin")):
-        sys.exit("Model dir missing model.bin: " + a.model)
+        print("Model dir missing model.bin: " + a.model, file=sys.stderr)
+        sys.exit(2)
 
     prompt = None if a.no_prompt else DEFAULT_PROMPT
     device = a.device
     compute = a.compute or ("float16" if device == "cuda" else "int8")
     dll_dirs = prepare_cuda_dlls() if device == "cuda" else []
-    duration = wav_duration(a.wav)
+    duration = read_duration(a.wav)
+
     fallback = None
-    t0 = time.time()
-    load_s = None
+    fallback_load_s = None
+    gpu_timings = {}
     try:
-        model = build_model(a.model, device, compute, a.cpu_threads)
-        load_s = round(time.time() - t0, 2)
-        t1 = time.time()
-        segs, info = transcribe(model, a.wav, a, prompt)
+        segs, info = run_attempt(a.model, a.wav, a, prompt, device, compute,
+                                 gpu_timings)
+        load_s, asr_s = gpu_timings["load_s"], gpu_timings["asr_s"]
     except Exception as e:
-        if device != "cuda":
-            raise
-        fallback = "%s: %s" % (type(e).__name__, str(e)[:200])
+        gpu_error = "%s: %s" % (type(e).__name__, str(e)[:300])
+        if device != "cuda" or a.no_fallback or not looks_like_gpu_failure(e):
+            # Not a GPU problem (or fallback disabled): retrying on CPU would
+            # waste the same minutes and hide the real cause.
+            print("transcription failed on %s\n  %s" % (device, gpu_error),
+                  file=sys.stderr)
+            sys.exit(3)
+        print("GPU attempt failed, retrying on CPU\n  %s" % gpu_error,
+              file=sys.stderr)
+        fallback_load_s = gpu_timings.get("load_s")
         device, compute = "cpu", "int8"
-        t1 = time.time()
-        model = build_model(a.model, device, compute, a.cpu_threads)
-        segs, info = transcribe(model, a.wav, a, prompt)
-    asr_s = round(time.time() - t1, 2)
+        cpu_timings = {}
+        try:
+            segs, info = run_attempt(a.model, a.wav, a, prompt, device, compute,
+                                     cpu_timings)
+        except Exception as e2:
+            print("both attempts failed\n  GPU: %s\n  CPU: %s: %s"
+                  % (gpu_error, type(e2).__name__, e2), file=sys.stderr)
+            sys.exit(4)
+        load_s, asr_s = cpu_timings["load_s"], cpu_timings["asr_s"]
+        fallback = gpu_error
 
     items = []
     for s in segs:
@@ -159,11 +237,15 @@ def main():
                    "initial_prompt": prompt,
                    "temperature": [0.0, 0.2, 0.4],
                    "word_timestamps": a.word_timestamps,
-                   "hallucination_silence_threshold": a.hallucination_silence_threshold},
+                   "hallucination_silence_threshold": a.hallucination_silence_threshold,
+                   "no_fallback": a.no_fallback},
         "timestamps": True, "segments": items, "text": text, "chars": len(text),
+        # load_s / asr_s always describe the device that finally succeeded;
+        # asr_s is pure inference, never model loading.
         "stats": stats, "load_s": load_s, "asr_s": asr_s,
         "rtf_x": round(duration / max(asr_s, 1e-6), 2),
-        "cuda_dll_dirs": dll_dirs, "fallback": fallback, "error": None,
+        "cuda_dll_dirs": dll_dirs, "fallback": fallback,
+        "fallback_load_s": fallback_load_s, "error": None,
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

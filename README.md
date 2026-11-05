@@ -2,7 +2,7 @@
 
 一个可随时调用的 WorkBuddy Skill：把「选方案 → 装环境 → 抽音频 → 转写 → 交叉核对 → 质检 → 精编」的完整经验，做成主文件精简、细节按需加载的技能包。
 
-- 版本：v0.3（2026-11-06）｜仓库已公开｜许可证 **MIT**（见 `LICENSE`）
+- 版本：v0.4（2026-11-06）｜仓库已公开｜许可证 **MIT**（见 `LICENSE`）
 - 内容来源：本机多轮实测沉淀的《转写经验_通用版》（完整原文见 `docs/转写经验_通用版.md`）
 - 适用：本地 / 离线、Windows、中文为主且含英文术语的视频转写
 - 版本规划与已修问题见 `ROADMAP.md`
@@ -32,7 +32,8 @@ python scripts/transcribe.py --wav "<编号>.wav" --model "<模型目录>" \
 
 # 6. 质检 + 自检测试
 python scripts/qc_check.py "out/A1_<编号>.json"
-python tests/run_smoke.py
+python tests/run_smoke.py          # 质检契约：33 类输入 / 863 条断言
+python tests/run_transcribe_unit.py  # 回退决策与耗时口径：35 条断言
 ```
 
 **输出**：`out/A1_<编号>.json`（结构化：`duration` / `device` / `segments[{s,e,t}]` / `stats`）+ 同名 `.md`（带时间戳可读版）。`qc_check.py` 退出码 0 = 无需复核，1 = 有 ERROR 或 RED/REVIEW；**RED 表示「需人工复核」，不等于判错**。
@@ -134,10 +135,14 @@ python tests/run_smoke.py
 
 ### CPU 回退：触发条件与判据
 
-- **触发**：`transcribe.py --device cuda`（默认）在**构造模型或推理阶段**抛异常时，自动改用 `cpu / int8` 重跑；若 CPU 也失败才真正报错。
+- **触发（已收窄）**：只有报错信息看起来**确实是 GPU / CUDA 问题**才回退——命中 `cuda / cublas / cudnn / cudart / nvml / gpu / out of memory / no kernel image`。典型：驱动版本不够、找不到 cuBLAS/cuDNN、显存不足。
+- **不回退**：模型文件损坏或版本不符、音视频解不出、参数不合法、其他程序错误。这些换 CPU 一样失败，回退只会把真正的错误埋掉、白等一遍。
+- **两个错误都保留**：回退后 CPU 也失败时，GPU 与 CPU 两侧的错误一起打印；GPU 原始异常同时写进输出的 `fallback` 字段。
 - **性能影响**：从约 19× 实时降到约 2.6–2.9×，一条 3 分钟音频约需 1 分钟以上。
-- **怎么判断实际用了哪个**：读输出 JSON 的 **`device` 字段**（`cuda` 或 `cpu`），以及 `fallback` 字段（非空即发生过回退，含原始异常）。**不要只看命令行 `--device` 入参**。
-- 显式只要 CPU：`--device cpu --compute int8`。
+- **怎么判断实际用了哪个**：读输出 JSON 的 `device`（`cuda` / `cpu`）、`fallback`（非空即回退过，含原始异常）、`fallback_load_s`（失败那次尝试已完成的模型加载耗时，未完成则为 `null`）。**不要只看命令行 `--device` 入参**。
+- **耗时口径**：`load_s` / `asr_s` 只描述**最终成功的设备**；`asr_s` 是纯推理，**不含模型加载**；`rtf_x = duration / asr_s`。
+- 显式只要 CPU：`--device cpu --compute int8`；排查显卡问题时禁用回退：`--no-fallback`。
+- **退出码**：`0` 成功｜`2` 输入或模型目录不可用｜`3` 当前设备失败且未回退｜`4` GPU 与 CPU 都失败。
 
 ---
 
@@ -166,7 +171,8 @@ asr-transcription/
 │   ├── check_env.py          # 只读环境自检（含 CUDA DLL 文件检查）
 │   └── qc_check.py           # 输入校验(ERROR) + 四项粗筛 + 三查(RED/REVIEW)
 ├── tests/
-│   └── run_smoke.py          # 零依赖回归测试：26 类输入 / 666 条断言
+│   ├── run_smoke.py          # 零依赖回归：质检契约 33 类输入 / 863 条断言
+│   └── run_transcribe_unit.py # 零依赖单测：回退决策 / 耗时口径 / DLL 句柄
 └── docs/
     └── 转写经验_通用版.md     # 完整原文归档；运行时以 references 为准
 ```
@@ -182,7 +188,7 @@ asr-transcription/
 | 环境自检 | ✅ 已自动化 | `scripts/check_env.py`（打印版本 / 显卡 / DLL / 磁盘 / 模型目录） |
 | 主力转写 | ✅ 已自动化 | `scripts/transcribe.py`（GPU→CPU 回退、统一 JSON + MD） |
 | 结果质检 | ✅ 已自动化 | `scripts/qc_check.py`（ERROR / RED 分级、退出码可进 CI） |
-| 回归测试 | ✅ 已自动化 | `tests/run_smoke.py`（不依赖网络 / 模型 / GPU） |
+| 回归测试 | ✅ 已自动化 | `tests/run_smoke.py` + `tests/run_transcribe_unit.py`（不依赖网络 / 模型 / GPU） |
 | 抽音频、异源方案对照、差异对齐、精编、留痕、批处理 | 🤝 **Agent 工作流** | Skill 指导 Agent 调命令、判读结果、组织人工复核；**没有对应脚本** |
 | 首末段回听、建术语表、提供标准答案、商用许可核对 | 👤 手动 | 需人工判断 |
 
@@ -206,7 +212,7 @@ asr-transcription/
 1. Skill 是否被目标工具识别（能触发转写类提问）？
 2. `scripts/transcribe.py`、`check_env.py`、`qc_check.py` 路径是否正确、能否 `--help`？
 3. `python -c "import faster_whisper, ctranslate2, av"` 是否无报错？
-4. `python tests/run_smoke.py` 是否全过（不需要模型）？
+4. `python tests/run_smoke.py` 与 `python tests/run_transcribe_unit.py` 是否全过（不需要模型）？
 5. 能否用一条自己的 WAV 完成一次最小转写并读到 `device` 字段？
 
 安装失败时按上述顺序定位：Skill 未被识别 → 工具约定问题；`--help` 失败 → 脚本路径问题；import 失败 → 运行依赖问题。
@@ -219,11 +225,13 @@ asr-transcription/
 
 | 标记 | 含义 | 动作 |
 |---|---|---|
-| `[ERROR]` / `"errors"` | 确定的输入数据问题（字段缺失、非数字、负数、乱序、duration 无效） | 修输入或产出脚本；**不要当成"稿子转错了"** |
+| `[ERROR]` / `"errors"` | 确定的输入数据问题（字段缺失、非数字、**非有限数值 NaN/Infinity**、负数、乱序、duration 无效） | 修输入或产出脚本；**不要当成"稿子转错了"** |
 | `[RED/REVIEW]` / `"red"` | 风险信号（重叠、空文本、越界、长间隙、提示语回音、无时间戳） | 人工复核对应区间；**不等于判错** |
 | `[warn]` | 粗筛指标越界（密度、段数、尾部空） | 参考，不单独触发退出码 |
 
 阈值严格大于：`gap > 8.00 s`（8.00 不报、8.01 报）、`overrun > 0.50 s`。可用 `--gap` / `--tail` 调整。文本与 `--json` 模式都在有 ERROR 或 RED 时返回退出码 1。
+
+任一时间戳无效（缺失、非数字、NaN/Infinity）时，`max_gap_s` / `tail_gap_s` / `tail_overrun_s` 输出 `null`、`note` 写明原因，**不会用 0.00 之类的占位值编数字**；文本类指标照常输出。`--json` 始终是严格 JSON，不会出现 `NaN` / `Infinity`。
 
 ---
 
