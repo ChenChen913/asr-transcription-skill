@@ -29,8 +29,15 @@ When duration is missing or <= 0, or ANY segment timestamp is unusable, the
 timestamp-dependent checks are NOT run and the report says so explicitly
 ("无法检查 / cannot check"); those metrics are reported as null instead of a
 misleading 0.00. Non-finite numbers (NaN / +-Inf) and ints too large for a
-float are ERROR, never silently accepted. --json output is always strict JSON
-(non-finite values are emitted as null, never as NaN/Infinity).
+float are ERROR, never silently accepted.
+
+"Usable" means BOTH numeric and logically valid. A timestamp that parses is
+not automatically usable: a negative start, end < start, or out-of-order
+segments make gap/tail arithmetic meaningless (out-of-order input once
+produced max_gap_s = -25.00, a physically impossible value). Such files get
+note "INVALID TIMELINE" and all three time metrics null, while text-derived
+metrics (chars / punct_per_100 / chars_per_min) remain valid. --json output is
+always strict JSON (non-finite values are emitted as null, never NaN/Infinity).
 
 Inputs WITHOUT real timestamps (single placeholder segment covering the whole
 audio, or "timestamps": false) are flagged: tail/gap metrics are N/A.
@@ -61,6 +68,8 @@ DUR_BAD_NOTE = ("INVALID/MISSING DURATION: 无法检查 (cannot check) "
                 "tail/gap/overrun checks; metrics reported as null")
 TS_BAD_NOTE = ("INVALID TIMESTAMPS: 时间类指标未计算 (gap/tail/overrun = N/A); "
                "fix the segment timestamps and re-run")
+TIMELINE_BAD_NOTE = ("INVALID TIMELINE: 时间轴逻辑无效 (negative start / end < start / "
+                     "out of order); gap/tail/overrun = N/A; text metrics still valid")
 PUNCT = r"[，。！？、,.!?;；:：]"
 DEFAULT_GAP = 8.0            # strictly greater-than
 DEFAULT_TAIL = 10.0          # strictly greater-than, warning only
@@ -117,11 +126,20 @@ def result_with_errors(name, errors):
 
 
 def validate(d):
-    """Return (segs, errors, review, dur_ok, dur, ts_ok).
+    """Return (segs, errors, review, dur_ok, dur, ts_ok, ts_problem).
 
     No exceptions on malformed input: every problem becomes a readable ERROR.
-    ts_ok is False when ANY timestamp is unusable; callers must then skip every
-    time-dependent metric instead of computing it from placeholder values.
+
+    Two separate notions, deliberately kept apart:
+      * numeric readability -- every timestamp parsed to a finite float;
+      * timeline validity  -- start >= 0, end >= start, segments in order.
+    ts_ok is True only when BOTH hold. A file whose timestamps merely parse is
+    still unusable for gap/tail arithmetic if the timeline is nonsense: a
+    negative start invents a gap, end < start makes the segment run backwards,
+    and out-of-order segments yield a NEGATIVE max_gap (seen: -25.00 s). So
+    callers must skip every time-dependent metric unless ts_ok is True.
+    ts_problem is "", "numeric", "timeline" or "numeric+timeline"; it only
+    selects the wording of the note.
     """
     errors, review = [], []
     raw_dur = d.get("duration", _MISSING)
@@ -143,7 +161,8 @@ def validate(d):
 
     raw = d.get("segments", _MISSING)
     segs = []
-    ts_ok = True
+    ts_ok = True          # every timestamp parsed to a finite float
+    timeline_bad = False  # parsed fine, but the timeline is logically invalid
     if raw is _MISSING or raw is None:
         txt = d.get("text")
         if isinstance(txt, str) and txt.strip():
@@ -189,8 +208,10 @@ def validate(d):
             if s is not None and e is not None:
                 if s < 0:
                     errors.append("%s start < 0 (%.2f)" % (label, s))
+                    timeline_bad = True
                 if e < s:
                     errors.append("%s end < start (%.2f < %.2f)" % (label, e, s))
+                    timeline_bad = True
             if not t.strip():
                 review.append("%s empty/whitespace-only text (review)" % label)
             # Placeholders exist only to keep the text usable; they are never
@@ -204,13 +225,16 @@ def validate(d):
                 if cur["s"] < prev["s"] - OVERLAP_EPS:
                     errors.append("segments out of order at index %d (%.2f < %.2f)"
                                   % (i, cur["s"], prev["s"]))
+                    timeline_bad = True
                 ov = prev["e"] - cur["s"]
                 # Overlap is only meaningful when the two segments are in order;
                 # out-of-order segments already produce an ERROR above.
                 if cur["s"] >= prev["s"] - OVERLAP_EPS and ov > OVERLAP_EPS:
                     review.append("overlapping segments at index %d (%.2fs overlap, review)"
                                   % (i, ov))
-    return segs, errors, review, dur_ok, dur, ts_ok
+    problem = "+".join([p for p in ("" if ts_ok else "numeric",
+                                    "timeline" if timeline_bad else "") if p])
+    return segs, errors, review, dur_ok, dur, ts_ok and not timeline_bad, problem
 
 
 def check(path, gap_limit, tail_limit):
@@ -218,7 +242,7 @@ def check(path, gap_limit, tail_limit):
         d = json.load(f)
     if not isinstance(d, dict):
         return blank_row(os.path.basename(path), "top-level JSON must be an object")
-    segs, errors, red, dur_ok, dur, ts_ok = validate(d)
+    segs, errors, red, dur_ok, dur, ts_ok, ts_problem = validate(d)
     if not segs:
         return result_with_errors(os.path.basename(path),
                                   errors or ["no usable segments"])
@@ -250,8 +274,11 @@ def check(path, gap_limit, tail_limit):
                  and abs(segs[0]["e"] - dur) < 0.05)
 
     warn = []
-    if not ts_ok:
-        warn.append(TS_BAD_NOTE)
+    # Numeric failure is the more fundamental one, so it wins the wording.
+    ts_note = "" if ts_ok else (TIMELINE_BAD_NOTE
+                                if ts_problem == "timeline" else TS_BAD_NOTE)
+    if ts_note:
+        warn.append(ts_note)
     if no_ts:
         red.append(NO_TS_NOTE)
         warn.append("segment count / gaps / tail are not meaningful here")
@@ -303,7 +330,7 @@ def check(path, gap_limit, tail_limit):
     if no_ts:
         note = NO_TS_NOTE
     elif not ts_ok:
-        note = TS_BAD_NOTE
+        note = ts_note
     elif not dur_ok:
         note = DUR_BAD_NOTE
     else:
@@ -393,9 +420,13 @@ def main():
                       % (r["punct_per_100"], r["chars_per_min"], r["segs_per_min"],
                          r["max_gap_s"], r["tail_gap_s"], r["tail_overrun_s"]))
             else:
-                why = ("invalid timestamps" if not r.get("has_timestamps")
-                       and r.get("note", "").startswith("INVALID TIMESTAMPS")
-                       else "no timestamps")
+                note = r.get("note", "")
+                if note.startswith("INVALID TIMESTAMPS"):
+                    why = "invalid timestamps"
+                elif note.startswith("INVALID TIMELINE"):
+                    why = "invalid timeline"
+                else:
+                    why = "no timestamps"
                 print("    punct/100=%.2f  chars/min=%.1f | "
                       "maxgap/tail/overrun = N/A (%s)"
                       % (r["punct_per_100"], r["chars_per_min"], why))

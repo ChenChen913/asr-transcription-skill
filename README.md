@@ -2,7 +2,7 @@
 
 一个可随时调用的 WorkBuddy Skill：把「选方案 → 装环境 → 抽音频 → 转写 → 交叉核对 → 质检 → 精编」的完整经验，做成主文件精简、细节按需加载的技能包。
 
-- 版本：v0.4.1（2026-11-06）｜仓库已公开｜许可证 **MIT**（见 `LICENSE`）；授权范围与第三方归属见 `NOTICE.md`
+- 版本：v0.4.2（2026-11-06）｜仓库已公开｜许可证 **MIT**（见 `LICENSE`）；授权范围与第三方归属见 `NOTICE.md`
 - 内容来源：本机多轮实测沉淀的《转写经验_通用版》（完整原文见 `docs/转写经验_通用版.md`）
 - 适用：本地 / 离线、Windows、中文为主且含英文术语的视频转写
 - 版本规划与已修问题见 `ROADMAP.md`
@@ -32,7 +32,7 @@ python scripts/transcribe.py --wav "<编号>.wav" --model "<模型目录>" \
 
 # 6. 质检 + 自检测试
 python scripts/qc_check.py "out/A1_<编号>.json"
-python tests/run_smoke.py          # 质检契约：33 类输入 / 863 条断言
+python tests/run_smoke.py          # 质检契约：33 类输入 / 881 条断言
 python tests/run_transcribe_unit.py  # 回退决策与耗时口径：35 条断言
 ```
 
@@ -171,8 +171,9 @@ asr-transcription/
 │   ├── transcribe.py         # 真正执行转写，产出统一 JSON + MD
 │   ├── check_env.py          # 只读环境自检（含 CUDA DLL 文件检查）
 │   └── qc_check.py           # 输入校验(ERROR) + 四项粗筛 + 三查(RED/REVIEW)
+│                             #   时间轴无效(负值/倒序/乱序) → 时间指标置 null
 ├── tests/
-│   ├── run_smoke.py          # 零依赖回归：质检契约 33 类输入 / 863 条断言
+│   ├── run_smoke.py          # 零依赖回归：质检契约 33 类输入 / 881 条断言
 │   └── run_transcribe_unit.py # 零依赖单测：回退决策 / 耗时口径 / DLL 句柄
 └── docs/
     └── 转写经验_通用版.md     # 完整原文归档；运行时以 references 为准
@@ -227,6 +228,7 @@ asr-transcription/
 | 标记 | 含义 | 动作 |
 |---|---|---|
 | `[ERROR]` / `"errors"` | 确定的输入数据问题（字段缺失、非数字、**非有限数值 NaN/Infinity**、负数、乱序、duration 无效） | 修输入或产出脚本；**不要当成"稿子转错了"** |
+| ↳ 时间轴失效 | 负数起点 / `end < start` / 乱序：数值能读，但时间轴不成立 | 三个时间指标置 `null`、`has_timestamps=false`（`note` 写 `INVALID TIMELINE`）；`chars` 等文本指标照常可用 |
 | `[RED/REVIEW]` / `"red"` | 风险信号（重叠、空文本、越界、长间隙、提示语回音、无时间戳） | 人工复核对应区间；**不等于判错** |
 | `[warn]` | 粗筛指标越界（密度、段数、尾部空） | 参考，不单独触发退出码 |
 

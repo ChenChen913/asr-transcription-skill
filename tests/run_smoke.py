@@ -187,6 +187,13 @@ def _reject_constant(token):
 TS_INVALID_CASES = ("start_nan", "mid_start_nan", "end_inf",
                     "missing_start", "non_numeric")
 
+# Timestamps parse to finite floats, but the timeline itself is nonsense.
+# These used to be ERROR *and* still report time metrics: out-of-order input
+# produced max_gap_s = -25.00 / tail_overrun_s = -25.00 with
+# has_timestamps = true. Now every time metric must be null while the
+# text-derived metrics stay usable.
+TIMELINE_INVALID_CASES = ("negative_start", "end_before_start", "out_of_order")
+
 
 def main():
     checks = [0]
@@ -218,6 +225,10 @@ def main():
                     assert_that(kw in out, "%s missing diagnostic %r" % (tag, kw))
                 for kw in must_not:
                     assert_that(kw not in out, "%s false positive %r" % (tag, kw))
+                if not mode and name in TIMELINE_INVALID_CASES:
+                    # Text mode must not print fabricated gap/tail numbers.
+                    assert_that("N/A (invalid timeline)" in out,
+                                "%s text mode must say why the metrics are N/A" % tag)
                 if mode:
                     try:
                         rows = json.loads(out, parse_constant=_reject_constant)
@@ -233,13 +244,23 @@ def main():
                         if exp_status == "REVIEW":
                             assert_that(len(row.get("red", [])) > 0,
                                         "%s REVIEW must carry red[]" % tag)
-                        if name in TS_INVALID_CASES:
+                        if name in TS_INVALID_CASES + TIMELINE_INVALID_CASES:
                             assert_that(row.get("max_gap_s") is None
                                         and row.get("tail_gap_s") is None
                                         and row.get("tail_overrun_s") is None,
                                         "%s time metrics must be null, not fabricated" % tag)
                             assert_that(row.get("has_timestamps") is False,
                                         "%s has_timestamps must be False" % tag)
+                        if name in TIMELINE_INVALID_CASES:
+                            assert_that(row.get("note", "").startswith("INVALID TIMELINE"),
+                                        "%s note must name the timeline problem, got %r"
+                                        % (tag, row.get("note", "")[:40]))
+                            # The text is still readable; do not throw it away.
+                            assert_that(row.get("chars", 0) > 0,
+                                        "%s text metrics must survive" % tag)
+                            assert_that(row.get("chars_per_min") is not None
+                                        and row.get("punct_per_100") is not None,
+                                        "%s text-derived metrics must be present" % tag)
                         if name == "no_timestamps":
                             assert_that(row.get("max_gap_s") is None
                                         and row.get("tail_overrun_s") is None,

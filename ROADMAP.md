@@ -15,6 +15,7 @@
 | **v0.3** | **2026-11-06** | 依据第二轮审核完成**阶段 A + 阶段 B**（见下）。质检脚本加入输入校验与 ERROR/REVIEW 分级；测试从 5 类扩到 26 类；补齐能力归属、已验证环境矩阵、决策入口与 Quick Start；新增本文件。 |
 | **v0.4** | **2026-11-06** | 依据第三轮审核做运行时健壮性：非有限数值校验、DLL 句柄存活、无效时间戳不参与统计、严格 JSON 输出、回退收窄、耗时口径。测试扩到 33 类 / 863 条断言，另加 35 条断言的回退单测。 |
 | v0.4.1 | 2026-11-06 | 许可证打包修正：`LICENSE` 去掉正文后的附加段落（GitHub 因此识别为 `NOASSERTION`），恢复为纯 MIT 正文；授权范围、第三方归属与「不含模型权重/音频」声明移入新建的 `NOTICE.md`。无代码改动。 |
+| **v0.4.2** | **2026-11-06** | 依据第四轮审核区分「能解析」与「时间轴有效」：负起点 / `end < start` / 乱序一律使三个时间指标置 `null`、`has_timestamps=false`，`note` 新增 `INVALID TIMELINE`。测试 33 类 / 881 断言（+18）。 |
 
 ### v0.3 阶段 A（P0，已全部完成）
 
@@ -59,6 +60,17 @@
 | B5 回退收窄 | 只对命中 `cuda / cublas / cudnn / cudart / nvml / gpu / out of memory / no kernel image` 的错误回退；模型、音频、参数类错误直接报原始错误。新增 `--no-fallback`；GPU 与 CPU 两侧错误同时保留；退出码 `2` 输入/模型不可用、`3` 当前设备失败、`4` 两侧都失败。 |
 | B6 耗时口径 | 建模型与推理分开计时；`load_s` / `asr_s` 只描述最终成功的设备，`asr_s` 为纯推理，`rtf_x = duration / asr_s`；新增 `fallback_load_s` 记录失败那次已完成加载的耗时。修复前回退时 `asr_s` 混入 CPU 模型加载、加载失败时 `load_s` 为 `null`。 |
 | B7 回归 | 131 份历史输出仍为 **0 ERROR / 39 REVIEW**（分布不变），28 份批次仍 **0 ERROR / 13 REVIEW**；`run_smoke.py` 33 类 / 863 断言、`run_transcribe_unit.py` 35 断言全绿。真机三连：GPU 正常出 `cuda`；强制 CUDA 失败回退 `cpu` 且 `rtf_x` 与纯 CPU 基线一致；损坏 `model.bin` 不回退、退出码 3。 |
+
+### v0.4.2 时间轴有效性（第四轮审核，已完成）
+
+| 项 | 结果 |
+|---|---|
+| 问题 | `validate()` 只在时间戳**读不出来**（缺失 / 非数字 / 非有限）时置 `ts_ok=False`；负起点、`end < start`、乱序虽然都报了 ERROR，但 `ts_ok` 仍为 `True`，后续照旧算 gap/tail/overrun。 |
+| 实测（修复前） | `start=-3` → ERROR 却给出 `max_gap=3.00 tail=0.00 overrun=0.00`、`has_timestamps=true`；`s=10,e=5` → `max_gap=7.00`；乱序（20s 段在前、0s 段在后）→ **`max_gap=-25.00`、`tail_overrun=-25.00`**，物理上不可能，且 `has_timestamps` 仍为 `true`。 |
+| 修复 | `validate()` 内部分成两个判定：`ts_ok`（数值可解析）与 `timeline_bad`（负值 / 倒序 / 乱序），返回值改为 `(..., ts_ok and not timeline_bad, ts_problem)`；`ts_problem` ∈ `""` / `numeric` / `timeline` / `numeric+timeline`，只用来选措辞。乱序检测仍以数值可解析为前提，保证错误信息不丢。 |
+| 输出变化 | 时间轴失效时 `max_gap_s` / `tail_gap_s` / `tail_overrun_s` 全 `null`、`has_timestamps=false`、`note` 写 `INVALID TIMELINE`（与 `INVALID TIMESTAMPS` 区分）；`chars` / `punct_per_100` / `chars_per_min` 照常输出——稿子还能读，只废掉时间维度。文本模式打印 `maxgap/tail/overrun = N/A (invalid timeline)`，不再印出编造数字。 |
+| 测试 | `run_smoke.py` 新增 `TIMELINE_INVALID_CASES`（3 个已有用例并入时间指标必须为 null 的断言，另加 note 前缀、文本指标存活、文本模式 N/A 原因），**863 → 881 断言**。 |
+| 回归 | 131 份历史输出仍 **0 ERROR / 39 REVIEW**，28 份批次仍 **0/13**——真实 faster-whisper 输出没有触发这类输入，改动只影响异常输入。 |
 
 ### v0.4 中「没照单全收」的部分
 
