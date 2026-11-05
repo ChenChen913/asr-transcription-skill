@@ -26,6 +26,28 @@ def run(cmd):
         return ""
 
 
+def cuda_dlls():
+    """Locate cublas/cudnn bin dirs and report which key DLL files exist."""
+    import site
+    bases = []
+    for getter in ("getusersitepackages", "getsitepackages"):
+        try:
+            v = getattr(site, getter)()
+            bases += v if isinstance(v, list) else [v]
+        except Exception:
+            pass
+    want = {"cublas": ["cublas64_12.dll", "cublasLt64_12.dll"],
+            "cudnn": ["cudnn64_9.dll", "cudnn_ops64_9.dll"]}
+    found = {}
+    for b in bases:
+        for sub, files in want.items():
+            d = os.path.join(b, "nvidia", sub, "bin")
+            if os.path.isdir(d):
+                found[sub] = {"dir": d,
+                              "dlls": {f: os.path.isfile(os.path.join(d, f)) for f in files}}
+    return found
+
+
 def main():
     ap = argparse.ArgumentParser(description="Read-only ASR environment check")
     ap.add_argument("--models", nargs="*", default=[],
@@ -51,6 +73,12 @@ def main():
 
     out["gpu"] = run(["nvidia-smi", "--query-gpu=name,memory.total,memory.free,driver_version",
                       "--format=csv,noheader"])
+    out["cuda_dlls"] = cuda_dlls()
+    try:
+        import ctranslate2 as c
+        out["cuda_compute_types"] = list(c.get_supported_compute_types("cuda"))
+    except Exception as e:
+        out["cuda_compute_types"] = "UNAVAILABLE: " + str(e)[:120]
     out["ffmpeg"] = run(["ffmpeg", "-version"]).splitlines()[:1]
     out["ffprobe"] = run(["ffprobe", "-version"]).splitlines()[:1]
     out["ffmpeg"] = out["ffmpeg"][0] if out["ffmpeg"] else ""
@@ -79,6 +107,13 @@ def main():
     for k, v in out["modules"].items():
         print("  %-22s %s" % (k, v if v else "not installed"))
     print("CUDA devices:", out["cuda_devices"])
+    print("CUDA compute types:", out["cuda_compute_types"])
+    for sub, v in out["cuda_dlls"].items():
+        ok = sum(v["dlls"].values())
+        print("  %-7s DLL %d/%d present | %s" % (sub, ok, len(v["dlls"]), v["dir"]))
+    if not out["cuda_dlls"]:
+        print("  WARNING: no cublas/cudnn bin directories found")
+    print("  NOTE: DLL file presence does NOT prove they load; run one real inference.")
     print("GPU         :", out["gpu"] or "nvidia-smi unavailable")
     print("ffmpeg      :", out["ffmpeg"] or "NOT FOUND")
     for d, v in out["disks"].items():

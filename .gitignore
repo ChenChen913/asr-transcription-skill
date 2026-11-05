@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+Thumbs.db
+*.zip
+*.wav
+*.mp4
+_bench*/
+out/
+transcripts/
+.venv/
+venv/

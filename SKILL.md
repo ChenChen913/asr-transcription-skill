@@ -30,9 +30,9 @@ agent_created: true
 | 步 | 动作 | 需要时读取 |
 |---|---|---|
 | 0 | 回答开测四问：本轮要回答什么、判分依据在不在、口径红线是否定好、产物会不会覆盖旧结果 | `references/02-workflow.md` |
-| 1 | 环境自检（显卡、模型目录、CUDA DLL、ffmpeg、版本锁） | `references/06-environment.md`、`scripts/check_env.py` |
+| 1 | 环境自检（显卡、模型目录、CUDA DLL 文件、ffmpeg、版本锁），并**跑一句真实推理**确认 DLL 能加载 | `references/06-environment.md`、`scripts/check_env.py` |
 | 2 | 用 FFmpeg 统一抽 16 kHz 单声道 WAV，所有方案共用同一份输入 | `references/02-workflow.md` |
-| 3 | 主力转写：faster-whisper + turbo / GPU，参数照抄 | `references/01-selection.md`、`references/03-parameters.md` |
+| 3 | 主力转写：直接跑 `scripts/transcribe.py`（faster-whisper + turbo / GPU），GPU 失败自动回退 CPU，产出 qc_check 可读的 JSON + MD | `references/01-selection.md`、`references/03-parameters.md` |
 | 4 | 可选：异源轻量方案跑一遍，作为快速预览 / 第二意见 / 漏段线索 | `references/01-selection.md`、`references/03-parameters.md` |
 | 5 | 对齐两份文本，人工只看分歧处和长间隙区间 | `references/02-workflow.md` |
 | 6 | 执行「转完必做三查」与质检（可跑 `scripts/qc_check.py`） | `references/04-quality.md` |
@@ -51,6 +51,7 @@ agent_created: true
 | 任何「跑不起来 / 结果不对」的排查 | `references/07-pitfalls.md` |
 | 结论能不能写、哪些不能外推 | `references/08-methodology.md` |
 | 某个模型是谁做的、什么许可证 | `references/09-attribution.md` |
+| 要真正跑一条转写、或查看输出 JSON 结构 | `scripts/transcribe.py` |
 | 直接抄命令 | `references/10-commands.md` |
 | 阅读未拆分的完整原文 | `docs/转写经验_通用版.md` |
 
@@ -68,10 +69,13 @@ agent_created: true
 - 不改原始输出；重跑写新目录；每个数字标出处，推测标推测。
 - 现成环境先自检再决定是否安装，别重复下载模型。
 - 关闭 `initial_prompt` 会让标点密度几乎归零，不要关；`word_timestamps` 默认 `False`，输出只有段级起止时间。
+- RED 表示「需人工复核」，不等于已判错；四个数字指标全过也不能替代三查。
 
 ## 可执行脚本
 
-- `scripts/check_env.py`：只读环境自检，输出版本、显卡、磁盘、模型目录状态。
-- `scripts/qc_check.py`：读取转写 JSON，执行四项粗筛与三查硬规则，输出标红项；支持 `--json` 机读。
+- `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD，GPU 失败自动回退 CPU；产物可直接喂给 qc_check。
+- `scripts/check_env.py`：只读环境自检，输出版本、显卡、CUDA DLL 文件、磁盘、模型目录状态。
+- `scripts/qc_check.py`：四项粗筛 + 三查硬规则；无真实时间戳的输入明确标 N/A；`--json` 与文本模式都按 RED 设退出码。
+- `tests/run_smoke.py`：零依赖冒烟测试，覆盖正常 / 无时间戳 / 尾段越界 / 长间隙 / 提示语泄漏。
 
 > 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测配置见 `README.md`。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。

@@ -28,4 +28,25 @@ cd "<可执行文件目录>" && ./<exe> -m <模型.gguf> --vad <vad.gguf> -a "<�
 
 > 交付时建议同时产出：逐次结果表（CSV）、汇总报告（MD）、原始输出目录、以及一份「数据出处」清单，把每个数字钉到具体文件或命令。
 
+### 用 Skill 自带脚本跑一条
+
+```bash
+python scripts/transcribe.py --wav "<编号>.wav" --model "<模型目录>" --out "out/<配置>_<编号>.json" --tag "<配置>_<编号>"
+python scripts/qc_check.py "out/<配置>_<编号>.json"
+python tests/run_smoke.py
+```
+
+### Windows PowerShell 写法
+
+> 上面的代码块是 bash 语法。Windows PowerShell 5.1 不支持 `VAR=value cmd` 和 `&&`；对应写法如下。
+
+```powershell
+$env:PYTHONPATH = "<工作区>\pylibs"
+python -c "import <包>; print(<包>.__version__)"
+Set-Location "<可执行文件目录>"
+.\<exe> -m <模型.gguf> --vad <vad.gguf> -a "<相对路径>\<编号>.wav"
+```
+
+> PowerShell 7 支持 `&&`；5.1 请拆成两行。复杂逻辑一律落成 `.py` 脚本再跑，别在命令行里拼 JSON 或嵌套多层引号。
+
 ---

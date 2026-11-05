@@ -2,7 +2,7 @@
 
 一个可随时调用的 WorkBuddy Skill：把「选方案 → 装环境 → 抽音频 → 转写 → 交叉核对 → 质检 → 精编」的完整经验，做成主文件精简、细节按需加载的技能包。
 
-- 版本：v0.1（2026-11-05）
+- 版本：v0.2（2026-11-05）｜仓库已公开
 - 内容来源：本机多轮实测沉淀的《转写经验_通用版_2026-11-05.md》（完整原文见 `docs/转写经验_通用版.md`）
 - 适用：本地 / 离线、Windows、中文为主且含英文术语的视频转写
 
@@ -54,6 +54,8 @@
 
 以下为 **2026-11-05** 实测值，用于解释本 Skill 里的速度、内存、显存数字是怎么来的。**这些是环境快照，不是 Skill 的硬性要求**；换机器请按 `references/06-environment.md` 逐条复核，不要照抄。
 
+> 本仓库已公开。下表只是**示例环境快照**，用于说明数字来源，不含用户名、绝对路径或任何凭据；读者请替换为自己的配置。
+
 | 项 | 实测值 |
 |---|---|
 | 操作系统 | Microsoft Windows 11 家庭版 中文版，build 26300 |
@@ -90,10 +92,15 @@ asr-transcription/
 │   ├── 09-attribution.md     # 第三方归属与许可证
 │   └── 10-commands.md        # 命令速查
 ├── scripts/
-│   ├── check_env.py          # 只读环境自检
-│   └── qc_check.py           # 转写结果质检（四项粗筛 + 三查硬规则）
+│   ├── transcribe.py         # 真正执行转写，产出统一 JSON + MD
+│   ├── check_env.py          # 只读环境自检（含 CUDA DLL 文件检查）
+│   └── qc_check.py           # 质检（四项粗筛 + 三查 + 无时间戳识别）
+├── tests/
+│   └── run_smoke.py          # 零依赖冒烟测试（10 个断言）
+├── LICENSE                   # 本 Skill 自身：MIT
+├── .gitignore
 └── docs/
-    └── 转写经验_通用版.md     # 未拆分的完整经验原文，可单独阅读
+    └── 转写经验_通用版.md     # 完整原文归档；运行时以 references 为准
 ```
 
 三级加载：`name` + `description` 常驻 → 触发后读 `SKILL.md` → 只按需要读某个 `references/` 文件。脚本可直接执行而不必读进上下文。
@@ -104,11 +111,14 @@ asr-transcription/
 
 - **WorkBuddy 用户级 Skill**：把整个目录放到 `~/.workbuddy/skills/asr-transcription/`（本机已安装在该位置）。
 - 触发方式：直接描述任务，例如「把这一批视频转成逐字稿」「转写结果开头不对，帮我排查」「要不要补一个中文识别模型」。
-- 命令行自检：
+- 命令行（Windows 示例；bash 写法见 `references/10-commands.md`）：
   ```bash
   python scripts/check_env.py --models D:/hf-models/faster-whisper-large-v3-turbo
-  python scripts/qc_check.py out/*.json --json
+  python scripts/transcribe.py --wav audio/S1.wav --model D:/hf-models/faster-whisper-large-v3-turbo --out out/A1_S1.json
+  python scripts/qc_check.py out/A1_S1.json
+  python tests/run_smoke.py
   ```
+- `qc_check.py` 的 RED 表示「需人工复核」，不等于已判错；文本与 `--json` 模式都在有 RED 时返回退出码 1，可直接进 CI。
 
 ---
 
@@ -117,4 +127,5 @@ asr-transcription/
 - 本仓库**不含**任何模型权重、测试音视频、逐字稿、访问令牌或本机绝对路径形式的凭据；只含方法、流程与可复用脚本。
 - 速度与资源数字是本机实测的量级参考，随机器、素材、后台负载波动，不构成性能承诺。
 - 没有人工标准答案时不报准确率；画面字幕 OCR 只能做旁证，不能当逐字真值。
+- 本 Skill 自身的文档与脚本采用 **MIT**（见 `LICENSE`）；这不改变任何第三方项目的许可。
 - 所有第三方项目的权利归各自维护方；本仓库不对它们主张任何权利。商用前请逐项核对代码许可与权重许可。
