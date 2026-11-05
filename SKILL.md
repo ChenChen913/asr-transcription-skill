@@ -25,24 +25,44 @@ agent_created: true
 2. 触发后只读本文件（< 5k 词）：拿流程骨架与路由表。
 3. **按需**再读 `references/` 下的单个文件；不要一次全读。长文件用 grep 定位，脚本可直接执行而不必读进上下文。
 
+## 能力归属（别高估自动化）
+
+| 类别 | 含义 | 对应环节 |
+|---|---|---|
+| **已自动化** | 脚本直接产出结果 | `check_env.py` 自检、`transcribe.py` 转写、`qc_check.py` 质检、`run_smoke.py` 测试 |
+| **Agent 工作流** | Skill 指导 Agent 调命令、判读结果、组织复核 | 抽音频、异源方案对照、差异对齐、精编留痕、**批处理** |
+| **手动** | 必须人工判断 | 首末段回听、建术语表、提供标准答案、商用许可核对 |
+
+> 「文档写了完整流程」≠「工具已自动实现」。**SenseVoice q8 GGUF 只有文档命令、没有对应脚本**，是可选的独立对照方案；批处理同样没有脚本，按 `references/02-workflow.md` 由 Agent 组织。详见 README「能力归属」表。
+
 ## 工作流骨架
 
-| 步 | 动作 | 需要时读取 |
+| 步 | 动作 | 谁来做 | 需要时读取 |
+|---|---|---|---|
+| 0 | 回答开测四问：本轮要回答什么、判分依据在不在、口径红线是否定好、产物会不会覆盖旧结果 | 人工 / Agent | `references/02-workflow.md` |
+| 1 | 环境自检（显卡、模型目录、CUDA DLL 文件、ffmpeg、版本锁），并**跑一句真实推理**确认 DLL 能加载 | 脚本 + 人工确认 | `references/06-environment.md`、`scripts/check_env.py` |
+| 2 | 用 FFmpeg 统一抽 16 kHz 单声道 WAV，所有方案共用同一份输入 | Agent 命令 | `references/02-workflow.md` |
+| 3 | 主力转写：直接跑 `scripts/transcribe.py`（faster-whisper + turbo / GPU），GPU 失败自动回退 CPU，产出 qc_check 可读的 JSON + MD | 脚本 | `references/01-selection.md`、`references/03-parameters.md` |
+| 4 | 可选：异源轻量方案跑一遍，作为快速预览 / 第二意见 / 漏段线索（**无脚本**） | Agent 命令 | `references/01-selection.md`、`references/03-parameters.md` |
+| 5 | 对齐两份文本，人工只看分歧处和长间隙区间 | Agent + 人工 | `references/02-workflow.md` |
+| 6 | 执行「转完必做三查」与质检（`scripts/qc_check.py`） | 脚本 + 人工 | `references/04-quality.md` |
+| 7 | 精编：术语表、标点、数字规整；留痕并复核许可证 | 人工 | `references/05-vocabulary.md`、`references/09-attribution.md` |
+
+## 方案分层与决策入口
+
+| 层 | 方案 | 什么时候用 |
 |---|---|---|
-| 0 | 回答开测四问：本轮要回答什么、判分依据在不在、口径红线是否定好、产物会不会覆盖旧结果 | `references/02-workflow.md` |
-| 1 | 环境自检（显卡、模型目录、CUDA DLL 文件、ffmpeg、版本锁），并**跑一句真实推理**确认 DLL 能加载 | `references/06-environment.md`、`scripts/check_env.py` |
-| 2 | 用 FFmpeg 统一抽 16 kHz 单声道 WAV，所有方案共用同一份输入 | `references/02-workflow.md` |
-| 3 | 主力转写：直接跑 `scripts/transcribe.py`（faster-whisper + turbo / GPU），GPU 失败自动回退 CPU，产出 qc_check 可读的 JSON + MD | `references/01-selection.md`、`references/03-parameters.md` |
-| 4 | 可选：异源轻量方案跑一遍，作为快速预览 / 第二意见 / 漏段线索 | `references/01-selection.md`、`references/03-parameters.md` |
-| 5 | 对齐两份文本，人工只看分歧处和长间隙区间 | `references/02-workflow.md` |
-| 6 | 执行「转完必做三查」与质检（可跑 `scripts/qc_check.py`） | `references/04-quality.md` |
-| 7 | 精编：术语表、标点、数字规整；留痕并复核许可证 | `references/05-vocabulary.md`、`references/09-attribution.md` |
+| **默认推荐** | faster-whisper + turbo / GPU（`scripts/transcribe.py`） | 符合已验证环境、要速度与稳定 |
+| **备用 / 可选** | turbo / CPU、large-v3 / GPU、SenseVoice q8 GGUF / CPU | 显卡被占、疑难片段复核、需要异源第二意见 |
+| **实验性** | Qwen3-ASR、FunASR Python 版、WhisperX、说话人分离 | 资源充足且明确要扩展；**本机未验证** |
+
+> 五个判断问题（有无 GPU / 资源够不够 / 要快还是要准 / 要不要异源交叉 / 主方案失败怎么办）见 `references/01-selection.md`。**turbo 与 large-v3 同源，不算独立异源验证。**
 
 ## 决策路由
 
 | 遇到什么 | 读取 |
 |---|---|
-| 选哪套方案、速度与资源大概什么量级 | `references/01-selection.md` |
+| 选哪套方案、速度与资源大概什么量级、五问决策 | `references/01-selection.md` |
 | 流程怎么排、断点续跑、产物命名 | `references/02-workflow.md` |
 | 参数怎么填、GPU DLL 报错、CPU 回退、版本锁 | `references/03-parameters.md` |
 | 质检、四个指标、标准答案、抽帧边界、幻觉形态 | `references/04-quality.md` |
@@ -52,6 +72,8 @@ agent_created: true
 | 结论能不能写、哪些不能外推 | `references/08-methodology.md` |
 | 某个模型是谁做的、什么许可证 | `references/09-attribution.md` |
 | 要真正跑一条转写、或查看输出 JSON 结构 | `scripts/transcribe.py` |
+| 质检报了 ERROR / RED，想知道区别和阈值 | `references/04-quality.md`、`scripts/qc_check.py` |
+| 我的环境算不算已验证、依赖版本要求 | `README.md` §3、`references/06-environment.md` |
 | 直接抄命令 | `references/10-commands.md` |
 | 阅读未拆分的完整原文 | `docs/转写经验_通用版.md` |
 
@@ -69,13 +91,14 @@ agent_created: true
 - 不改原始输出；重跑写新目录；每个数字标出处，推测标推测。
 - 现成环境先自检再决定是否安装，别重复下载模型。
 - 关闭 `initial_prompt` 会让标点密度几乎归零，不要关；`word_timestamps` 默认 `False`，输出只有段级起止时间。
-- RED 表示「需人工复核」，不等于已判错；四个数字指标全过也不能替代三查。
+- `qc_check.py` 分两级：**ERROR** = 确定的数据/格式错误（必须修输入），**RED/REVIEW** = 需人工复核的风险信号（不等于判错）。两者在文本与 `--json` 模式都返回退出码 1；阈值严格大于（`gap > 8.00 s`、`overrun > 0.50 s`），等于阈值不触发。
+- 四个数字指标全过也不能替代三查；RED 只说明「去看一眼」。
 
 ## 可执行脚本
 
-- `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD，GPU 失败自动回退 CPU；产物可直接喂给 qc_check。
+- `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD，GPU 失败自动回退 CPU；产物可直接喂给 qc_check。读输出里的 `device` 字段判断实际用的设备，别只看命令行入参。
 - `scripts/check_env.py`：只读环境自检，输出版本、显卡、CUDA DLL 文件、磁盘、模型目录状态。
-- `scripts/qc_check.py`：四项粗筛 + 三查硬规则；无真实时间戳的输入明确标 N/A；`--json` 与文本模式都按 RED 设退出码。
-- `tests/run_smoke.py`：零依赖冒烟测试，覆盖正常 / 无时间戳 / 尾段越界 / 长间隙 / 提示语泄漏。
+- `scripts/qc_check.py`：输入校验（ERROR）+ 四项粗筛 + 三查硬规则（RED/REVIEW）；无真实时间戳的输入明确标 N/A；duration 无效时明确报「无法检查」。
+- `tests/run_smoke.py`：零依赖回归测试，26 类输入 × 文本/JSON 两种模式，666 条断言，不需要网络 / 模型 / GPU。
 
-> 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测配置见 `README.md`。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。
+> 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测配置与已验证范围见 `README.md`。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。版本规划见 `ROADMAP.md`。

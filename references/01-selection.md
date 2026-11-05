@@ -47,6 +47,22 @@
 
 ## 1. 方案选型
 
+### 1.0 五问决策：先定方案，再动手
+
+按顺序回答，别一上来就比模型参数：
+
+| # | 问题 | 答「是」走这边 | 答「否」走这边 |
+|---|---|---|---|
+| 1 | 有可用 NVIDIA GPU，且 CUDA / cuBLAS / cuDNN 能加载？ | 进第 2 问 | 用 turbo / CPU（`--device cpu --compute int8`），速度约 2.6–2.9×；或先修环境 |
+| 2 | 可用运行内存 ≥ 5 GB、显存 ≥ 6 GB？ | **默认推荐**：turbo / GPU | 别碰 large-v3 和 torch 系；改用 turbo / CPU 或 SenseVoice q8 GGUF（纯 CPU、约 0.36 GB 内存） |
+| 3 | 要快，还是要专名/同音词更稳？ | 要快 → turbo / GPU；要稳一点 → large-v3 只做**疑难片段复核**（代价约 3 GB 内存 + 3.8 GB 显存） | — |
+| 4 | 需要真正独立的第二意见？ | 补 **SenseVoice q8 GGUF**（异源、纯 CPU），只人工核对两边分歧处 | 只跑主力，但「转完必做三查」不能省 |
+| 5 | 主力跑失败 / 环境不达标？ | 依次试：修 CUDA DLL → `--device cpu` → 换镜像重下依赖 → 查 `references/07-pitfalls.md` | — |
+
+> **不要把 turbo 与 large-v3 当成第 4 问的答案**：两者同源，共享编码器与训练数据，错误高度相关。要交叉验证必须换架构（SenseVoice 系）。
+>
+> 三层定位：**默认推荐** = turbo / GPU；**备用/可选** = turbo / CPU、large-v3 / GPU、SenseVoice q8 GGUF；**实验性** = Qwen3-ASR、FunASR Python 版、WhisperX、说话人分离（本机未验证，不进默认流程）。
+
 ### 1.1 主力：faster-whisper（SYSTRAN）+ Whisper large-v3-turbo（OpenAI），GPU
 
 选它的理由：底层是 OpenNMT 的 CTranslate2 推理引擎，CPU 可用、不依赖 torch、GPU 支持好、能直接吃普通目录里的模型权重（不走缓存）、**默认输出段级起止时间戳**便于对齐。

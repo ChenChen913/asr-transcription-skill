@@ -32,9 +32,12 @@ cd "<可执行文件目录>" && ./<exe> -m <模型.gguf> --vad <vad.gguf> -a "<�
 
 ```bash
 python scripts/transcribe.py --wav "<编号>.wav" --model "<模型目录>" --out "out/<配置>_<编号>.json" --tag "<配置>_<编号>"
-python scripts/qc_check.py "out/<配置>_<编号>.json"
+python scripts/qc_check.py "out/<配置>_<编号>.json"          # 人读
+python scripts/qc_check.py "out/<配置>_<编号>.json" --json   # 机读，可接 CI
 python tests/run_smoke.py
 ```
+
+> `qc_check.py` 退出码 1 = 有 ERROR 或 RED/REVIEW（**需人工复核，不等于判错**），0 = 无需复核。阈值严格大于：`gap > 8.00 s`、`overrun > 0.50 s`；可用 `--gap 10` / `--tail 15` 调整。分级含义见 `04-quality.md` §5.2.1。
 
 ### Windows PowerShell 写法
 

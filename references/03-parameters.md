@@ -13,7 +13,7 @@
 | `vad_filter` | `True` | 跳过长静音省时间；**但挡不住开头幻觉** |
 | `min_silence_duration_ms` | `300–400` | 太小切碎句子，太大漏话 |
 | `condition_on_previous_text` | `False` | 防止前一段的错误在后续段落循环放大 |
-| `initial_prompt` | `以下是普通话的句子，请使用简体中文，并加上标点符号。` | **必须保留**，关掉后标点密度归零 |
+| `initial_prompt` | `以下是普通话的句子，请使用简体中文，并加上标点符号。` | **必须保留**，关掉后标点密度掉到接近 0（0–0.1/百字） |
 | `temperature` | `0.0 / 0.2 / 0.4` | 是**段内**按重复率 / 置信度阈值逐级降级，不是整次转写失败后重跑 |
 | `word_timestamps` | `False`（默认） | 只给段级起止时间；设 `True` 才输出词级，速度更慢、占用更高，非必要不开 |
 | `device` / `compute_type` | `cuda` / `float16` | 有卡就一定用 GPU |
@@ -52,6 +52,16 @@ except Exception as e:             # 不要写裸 except:
 ```
 
 > 回退后把**实际使用的设备**写进输出，别让 JSON 里还记着 `cuda`。
+
+**用 `scripts/transcribe.py` 时**：默认 `--device cuda`，在**构造模型或推理**任一阶段抛异常就自动改 `cpu / int8` 重跑，CPU 再失败才真正报错。
+
+| 想知道什么 | 看输出 JSON 的哪里 |
+|---|---|
+| 实际跑在哪个设备 | `device` 字段（`cuda` / `cpu`）——**不要只看命令行 `--device` 入参** |
+| 有没有发生过回退 | `fallback` 字段，非空即回退过，内容是原始异常摘要 |
+| 速度差多少 | `rtf_x`：GPU 约 19×，CPU 约 2.6–2.9× |
+
+显式只要 CPU：`--device cpu --compute int8`。DLL 文件在磁盘上 ≠ 能加载，环境自检通过后仍要真跑一句推理确认。
 
 ### 3.4 版本锁定
 
