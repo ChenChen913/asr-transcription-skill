@@ -6,10 +6,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1359%20offline%20assertions-brightgreen.svg" alt="1359 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1381%20offline%20assertions-brightgreen.svg" alt="1381 offline assertions">
 </p>
 
-给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1359 条离线断言。
+给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1381 条离线断言。
 
 > [!NOTE]
 > 本仓库由 AI 辅助开发，脚本与数字都经人工实测复核，过程记录在 [`ROADMAP.md`](ROADMAP.md)。未验证的平台不写成「已支持」，见[已知限制](#已知限制)。
@@ -213,7 +213,14 @@ python scripts/ocr_subs.py --input "01.mp4" --out-dir "out" --fps 1.0
 
 所以黄色字幕不需要任何特殊处理——它只是字，不是颜色问题。
 
-默认只读画面下半幅（`--region 0.50,0.995`）、1 fps 采样。代价是慢：约 0.3 秒一帧，3 分钟视频约 1 分钟，比转写慢。所以它是**按需的第二意见**，不是默认路径。退出码 `3` 表示没有一个文件找到可读的字幕带。
+**但字幕带里往往不止一行。** 找对位置只解决了「哪一片区域有字」，没解决「哪一行在说话」。真实素材里另外两行很常见，而且都会把稿子写坏：
+
+- **双语字幕**：译文印在口播下面，两行同步变化，图里没有任何线索能说哪行是说的。按 `--language` 取（默认 `zh`）——保留中文、丢掉译文。不丢的代价很具体：实测字数 692 → 2816，而且 `merge_sources.py` 的相似度被英文拖到几乎每一对都判「不一致」。
+- **固定文案**：要点条、章节点、流程图常压在字幕下方。它们和字幕的字号一样、位置也一样，唯一的区别是**换得慢**——口播每秒换一行，要点条十几秒才换。所以按「一次停留连续多少帧几乎不变」剔除，实测口播 2 帧、要点条 9–17 帧。删的是长停留，不是整个位置：同一位置上章节点停 17 秒、中间闪过一句台词，台词会留下（实测 `发票要寄到上海办公室` 就是这样保住的）。两个保险：只有别的行换得快 2.5 倍以上才动手，且不低于 5 秒的绝对下限；整片都在慢换的（比如歌词）一行不动。**每帧都在变的图表仍然分不开**——它的节奏和对话一样快，25 条素材里只剩 7 条这样的残留。
+
+剔除和取舍都会写进产物的头部与 `params`，不会悄悄少字。
+
+默认只读画面下半幅（`--region 0.50,0.995`）、1 fps 采样。代价是慢：约 0.38 秒一帧，3 分钟视频约 1 分钟，比转写慢。所以它是**按需的第二意见**，不是默认路径。退出码 `3` 表示没有一个文件找到可读的字幕带。
 
 > 旧的纯 Pillow 方案（亮度 + 低饱和 + 行投影）已放弃：同一批素材上，白衬衫所在的行得分 117.8，比真实字幕带还高；而且"饱和度 ≤ 70"会把黄字直接排除。取舍记录见 `ROADMAP.md` 的 v0.7。
 
@@ -370,6 +377,7 @@ python scripts/merge_sources.py --heard "out/01.json" --seen "out/01-ocr.json" -
 | `--fps` | `1.0` | 每秒采样帧数；耗时与之严格成正比 |
 | `--region` | `0.50,0.995` | 纵向搜索窗口，按画面高度的比例 |
 | `--min-score` | `0.5` | 低于此置信度的行直接丢弃 |
+| `--language` | `zh` | 双语字幕保留哪一行：`zh` 留中文丢译文，`en` 反过来。一处都不匹配时全部保留，不会产出空稿 |
 | `--no-band` | 关 | 跳过字幕带定位，读整个 `--region`（只用于调试，会读进标题和水印） |
 | `--calib-frames` | `16` | 用于定位字幕带的抽样帧数 |
 | `--max-frames` | `900` | 采样帧上限；超出会自动降 fps 并在输出里说明 |
@@ -460,7 +468,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # 串行批处理
 │   ├── qc_check.py           # 输入校验 + 四项粗筛 + 三查
 │   └── check_env.py          # 只读环境自检
-├── tests/                    # 六套零依赖测试，共 1359 条断言
+├── tests/                    # 六套零依赖测试，共 1381 条断言
 └── docs/
     ├── 转写经验_通用版.md      # 未拆分的完整原文；与 references 冲突时以 references 为准
     ├── 字幕识别与OCR_调研与设计.md  # 三条通路与实测数据；字幕轨 → v0.6，硬字幕 → v0.7
@@ -490,7 +498,7 @@ python tests/run_merge_unit.py       # 对齐、相似度分级、时间偏移�
 43 assertions, 0 failures.
 102 assertions, 0 failures.
 79 assertions, 0 failures.
-51 assertions, 0 failures.
+73 assertions, 0 failures.
 58 assertions, 0 failures.
 ```
 
@@ -558,7 +566,7 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 ### 能力边界
 
 - **只有段级时间戳**。没有词级 `words`，没有说话人分离，不能直接导出 SRT / VTT（字幕轨抽取产出的 `.srt` 是源文件自带的，不是转写生成的）。
-- **"看"的能力分两级，都有边界**。有文本字幕轨或外挂 `.srt/.ass/.ssa/.vtt` 时 `extract_subs.py` 零推理直接抽（`engine=subtitle-track`）；没有就走 `ocr_subs.py` 逐帧 OCR（`engine=ocr`）。**图形字幕轨（PGS/VobSub/DVB）、竖排、花字、被遮挡的字仍然读不了**；OCR 只读画面下半幅，字幕在顶部就找不到；叠进字幕带的界面弹窗会被当成字幕读进来（位置过滤挡不住压在同一水平线上的元素）。它比转写慢（约 0.38 秒一帧），且需要额外装 OCR 运行时——没装时该脚本明确报错退出，另外四个脚本不受影响。
+- **"看"的能力分两级，都有边界**。有文本字幕轨或外挂 `.srt/.ass/.ssa/.vtt` 时 `extract_subs.py` 零推理直接抽（`engine=subtitle-track`）；没有就走 `ocr_subs.py` 逐帧 OCR（`engine=ocr`）。**图形字幕轨（PGS/VobSub/DVB）、竖排、花字、被遮挡的字仍然读不了**；OCR 只读画面下半幅，字幕在顶部就找不到。压在字幕**同一行**上的叠字也分不开——按纵向位置切只能分开不同行，分不开同一行里的两段文字；能被分开的是"另起一行、换得比口播慢"的那类固定文案（要点条、章节点、流程图），按变化节奏剔除，6 条素材共剔除 50 段；但逐帧都在变的图表仍会残留（25 条里 7 条）。它比转写慢（约 0.38 秒一帧），且需要额外装 OCR 运行时——没装时该脚本明确报错退出，另外五个脚本不受影响。
 - **字号太小就读不准**。640×360 这类素材上一行字只有十几像素，同一条字幕在两种留白下会读出不同结果（实测一致率 0.815）；它的产物仍然可用，但错字率明显高于竖屏 720p/1080p。
 - **互校只对齐，不裁决**。`merge_sources.py` 给出"哪几段两边不一致"，谁对谁错要回到音频和画面判断。它不产出合并稿，也不自动改任何一边。
 - **单文件失败不落盘**。直接调 `transcribe.py` 失败时没有产物，只能靠退出码判断。批量场景已覆盖（`_batch/summary.json` 记退出码与错误尾部），单文件场景仍是 `ROADMAP.md` 的 C4。

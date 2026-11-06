@@ -6,10 +6,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1359%20offline%20assertions-brightgreen.svg" alt="1359 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1381%20offline%20assertions-brightgreen.svg" alt="1381 offline assertions">
 </p>
 
-An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1359 offline assertions.
+An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1381 offline assertions.
 
 > [!NOTE]
 > This repository is AI-assisted. Every script and number has been verified by hand, and the process is recorded in [`ROADMAP.md`](ROADMAP.md). Platforms that were not tested are never described as supported — see [Known limitations](#known-limitations).
@@ -213,7 +213,14 @@ That third step is not slack, it is **required**: PP-OCR's detector needs vertic
 
 Yellow subtitles therefore need no special case — they are just text, not a colour problem.
 
-By default it reads only the lower half (`--region 0.50,0.995`) at 1 fps. The cost is real: about 0.3 s per frame, so a 3-minute clip takes roughly a minute — slower than transcribing it. That is why this is an **on-demand second opinion**, not the default path. Exit code `3` means no file had a readable subtitle band.
+**A band, though, usually holds more than one line.** Locating it only answers "where is there text"; it says nothing about *which line is being spoken*. Two other kinds turn up in real clips and both ruin the transcript:
+
+- **Bilingual subtitles**: the translation is printed under the dialogue and both lines change in step, so nothing in the picture says which one was said. `--language` decides (default `zh`): keep Chinese, drop the translation. Keeping it is expensive — measured 692 → 2816 characters, and the English dragged `merge_sources.py` similarity down far enough that nearly every pair came out contradictory.
+- **Set-dressing**: bullet blocks, chapter labels and flowcharts sit inside the band at the same font size. The only difference is **how fast they change** — dialogue is replaced every second, a bullet block every ten or twenty. So a *run* is dropped when it holds for too many consecutive frames: measured 2 frames for dialogue against 9–17 for the block under it. The unit is the run, not the position: one slot held a chapter card for 17 seconds and flashed a real line of dialogue in between, and the line survives (measured: `发票要寄到上海办公室`). Two guards: something else must be changing at least 2.5× faster, and the drop never goes below a five-second floor, so a clip of slow lyrics loses nothing. **A diagram that animates every frame still gets through** — it changes as fast as speech; 7 cues out of 25 clips.
+
+Both the drops and the language choice are written into the report header and `params` — nothing disappears quietly.
+
+By default it reads only the lower half (`--region 0.50,0.995`) at 1 fps. The cost is real: about 0.38 s per frame, so a 3-minute clip takes roughly a minute — slower than transcribing it. That is why this is an **on-demand second opinion**, not the default path. Exit code `3` means no file had a readable subtitle band.
 
 > The earlier pure-Pillow plan (bright, low-saturation pixels projected onto rows) was dropped: on the same clips a white shirt scored 117.8, higher than the real subtitle band, and the "saturation ≤ 70" gate excluded yellow text outright. The decision is recorded under v0.7 in `ROADMAP.md`.
 
@@ -369,6 +376,7 @@ There is **no config file, no API key, and no account**. Every parameter is a CL
 | `--fps` | `1.0` | Sampled frames per second; runtime is strictly proportional |
 | `--region` | `0.50,0.995` | Vertical search window, as a fraction of frame height |
 | `--min-score` | `0.5` | Lines below this confidence are dropped outright |
+| `--language` | `zh` | Which line to keep in a bilingual subtitle: `zh` keeps Chinese and drops the translation, `en` the reverse. If nothing matches, everything is kept — a wrong flag never yields an empty transcript |
 | `--no-band` | off | Skip band detection and read the whole `--region` (debugging only; it reads titles and watermarks too) |
 | `--calib-frames` | `16` | Sample frames used to locate the band |
 | `--max-frames` | `900` | Frame cap; beyond it the fps is lowered automatically and the output says so |
@@ -459,7 +467,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # serial batch runner
 │   ├── qc_check.py           # validation + four coarse metrics + three checks
 │   └── check_env.py          # read-only environment check
-├── tests/                    # six zero-dependency suites, 1359 assertions
+├── tests/                    # six zero-dependency suites, 1381 assertions
 └── docs/
     ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
     ├── 字幕识别与OCR_调研与设计.md  # three routes and measurements; the track part shipped as v0.6
@@ -489,7 +497,7 @@ Actual output (2026-11-06):
 43 assertions, 0 failures.
 102 assertions, 0 failures.
 79 assertions, 0 failures.
-51 assertions, 0 failures.
+73 assertions, 0 failures.
 58 assertions, 0 failures.
 ```
 
@@ -557,7 +565,7 @@ A: Not directly. Run `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le out.wa
 ### Capability boundaries
 
 - **Segment-level timestamps only.** No word-level `words`, no speaker diarisation, no direct SRT / VTT export (the `.srt` written by `extract_subs.py` is the source track, not generated by transcription).
-- **Seeing comes in two grades, both with edges.** `extract_subs.py` reads a sidecar `.srt/.ass/.ssa/.vtt` or an embedded **text** track with no inference (`engine=subtitle-track`); when there is none, `ocr_subs.py` reads the pixels frame by frame (`engine=ocr`). **Bitmap tracks (PGS/VobSub/DVB), vertical text, styled captions and occluded text are still unreadable**; OCR only searches the lower half, so subtitles at the top are never found; a UI popup overlapping the band is read as dialogue (a positional filter cannot separate elements on the same horizontal line). It is slower than transcribing (~0.38 s per frame) and needs the OCR runtime — without it that one script fails loudly and the other four are unaffected.
+- **Seeing comes in two grades, both with edges.** `extract_subs.py` reads a sidecar `.srt/.ass/.ssa/.vtt` or an embedded **text** track with no inference (`engine=subtitle-track`); when there is none, `ocr_subs.py` reads the pixels frame by frame (`engine=ocr`). **Bitmap tracks (PGS/VobSub/DVB), vertical text, styled captions and occluded text are still unreadable**; OCR only searches the lower half, so subtitles at the top are never found. Nor can it separate text layered on the *same* line as the subtitle — splitting by vertical position separates lines, not the two pieces of text inside one line. What it can separate is furniture that sits on its own line and changes slower than the dialogue (bullet blocks, chapter labels, flowcharts): those are dropped by cadence, 50 runs across 6 clips; an animation that changes every frame still slips through (7 cues out of 25). It is slower than transcribing (~0.38 s per frame) and needs the OCR runtime — without it that one script fails loudly and the other five are unaffected.
 - **Small text is read less reliably.** At 640×360 a line is a dozen pixels tall and the same cue reads differently under two crop paddings (measured agreement 0.815). The output is still usable, but the error rate is clearly higher than on a 720p/1080p vertical clip.
 - **Single-file failures leave no artefact.** Calling `transcribe.py` directly on a failing input produces nothing; only the exit code tells you. Batch covers it (`_batch/summary.json` records exit code and error tail); the single-file case is still C4 in `ROADMAP.md`.
 - **No accuracy claims.** Without a human reference there is no number. That is a rule, not modesty.

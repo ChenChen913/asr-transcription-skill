@@ -218,18 +218,181 @@ def ocr_boxes(engine, img, top_f, bot_f, min_score):
     return boxes
 
 
-def reading_of(boxes, height):
-    """Join the boxes of one frame into one line of text, top-to-bottom."""
+def lines_of(boxes, height, bucket=None):
+    """Split one frame's boxes into physical lines, top to bottom.
+
+    `bucket` is the height of one y-slot as a fraction of the frame, and it has
+    to be shared by every frame. Deriving it per frame looks harmless and is
+    not: a frame carrying one line and a frame carrying four get different
+    buckets, the same subtitle lands in different slots, and the per-line
+    statistics below never accumulate on anything.
+    """
     if not boxes:
+        return []
+    if not height:
+        return []
+    if bucket is None:
+        heights = sorted(b["y1"] - b["y0"] for b in boxes)
+        bucket = max(max(heights[len(heights) // 2], 6.0) * 0.5 / float(height), 0.004)
+    groups = {}
+    for b in boxes:
+        cy = (b["y0"] + b["y1"]) / 2.0 / float(height)
+        groups.setdefault(int(round(cy / bucket)), []).append(b)
+    out = []
+    for key, items in groups.items():
+        items.sort(key=lambda b: b["x0"])
+        text = tighten(" ".join(b["text"] for b in items))
+        if not text:
+            continue
+        scores = sorted(b["score"] for b in items)
+        out.append({"key": key, "text": text, "conf": scores[len(scores) // 2],
+                    "cy": sum((b["y0"] + b["y1"]) / 2.0 for b in items)
+                    / len(items) / float(height)})
+    out.sort(key=lambda g: g["cy"])
+    return out
+
+
+def _script_hits(text):
+    cjk = sum(1 for ch in text
+              if "\u3400" <= ch <= "\u4dbf" or "\u4e00" <= ch <= "\u9fff")
+    latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    return cjk, latin
+
+
+def pick_lines(lines, language):
+    """Keep the lines written in the language being transcribed.
+
+    A bilingual subtitle prints the translation under the dialogue, and both
+    change at the same cadence, so nothing in the picture says which one was
+    spoken - the flag does. Dropping the translation is not tidiness: keeping it
+    doubled the character count and dragged the heard/seen similarity low enough
+    that almost every pair in `merge_sources.py` looked contradictory.
+
+    The test is deliberately crude (does the line contain a character from the
+    target script) rather than a ratio: a real subtitle can be half technical
+    terms, and "Top K 和 Top N 到底如何取值" is more Latin letters than hanzi.
+    If no line matches, everything is kept - a wrong `--language` must never
+    produce an empty transcript.
+    """
+    if len(lines) < 2 or not language:
+        return lines, []
+    want_cjk = str(language).lower().startswith(("zh", "ja", "ko", "cmn", "yue"))
+    kept = []
+    for g in lines:
+        cjk, latin = _script_hits(g["text"])
+        if (cjk > 0) if want_cjk else (latin > 0):
+            kept.append(g)
+    if not kept or len(kept) == len(lines):
+        return lines, []
+    dropped = [g for g in lines if all(g is not k for k in kept)]
+    return kept, dropped
+
+
+def reading_of(boxes, height, language=None, bucket=None):
+    """Join the boxes of one frame into one line of text, top-to-bottom."""
+    lines = lines_of(boxes, height, bucket)
+    if not lines:
         return "", 0.0
-    heights = sorted(b["y1"] - b["y0"] for b in boxes)
-    line_h = max(heights[len(heights) // 2], 6.0)
-    bucket = max(line_h * 0.5, 4.0)
-    ordered = sorted(boxes, key=lambda b: (round(((b["y0"] + b["y1"]) / 2) / bucket),
-                                           b["x0"]))
-    text = tighten(" ".join(b["text"] for b in ordered))
-    scores = sorted(b["score"] for b in boxes)
+    lines, _ = pick_lines(lines, language)
+    text = tighten(" ".join(g["text"] for g in lines))
+    scores = sorted(g["conf"] for g in lines)
     return text, scores[len(scores) // 2]
+
+
+def furniture_texts(frame_lines, fps):
+    """Which on-screen texts are set-dressing rather than dialogue.
+
+    Calibrating the band answers "where is there text". It cannot answer "which
+    of these lines is being spoken", and on a clip with a bullet block under the
+    subtitles the two answers differ: every cue came back carrying the same 28
+    characters of slide copy, tripling the transcript.
+
+    Dialogue is replaced every second or two; a chapter label, a bullet block or
+    a flowchart sits still for ten or twenty. At one sample per second that is
+    one number per run - how many consecutive frames show the *same* text.
+    Measured on real clips: dialogue 2 frames, the block under it 9 to 17.
+
+    The unit is the run, not the y-slot. A slot near the bottom is often reused:
+    one clip put chapter cards there, and between two cards it also flashed real
+    example sentences for a second. Dropping the whole slot lost that dialogue;
+    dropping only runs longer than the floor keeps it.
+
+    Two guards keep this from eating real subtitles: a run is only dropped when
+    something else on screen changes at least 2.5x faster, and never below a
+    five-second floor. A clip whose every line is held for ten seconds has no
+    fast line, so nothing is dropped.
+
+    Returns (texts_to_drop, report). The report feeds the header and `params`,
+    so nothing disappears quietly.
+    """
+    n = len(frame_lines)
+    if n < 2:
+        return set(), {}
+    keys = sorted({g["key"] for lines in frame_lines for g in lines})
+    if len(keys) < 2:
+        return set(), {}
+    seq = {k: [] for k in keys}
+    for lines in frame_lines:
+        here = {g["key"]: g["text"] for g in lines}
+        for k in keys:
+            seq[k].append(norm_key(here.get(k, "")))
+
+    stats = {}
+    runs = []
+    for k, texts in seq.items():
+        present = sum(1 for t in texts if t)
+        if not present:
+            continue
+        i, m = 0, len(texts)
+        best = 0
+        while i < m:
+            if not texts[i]:
+                i += 1
+                continue
+            # Similar, not identical. OCR jitters by a character or two on a
+            # card that never changed, and exact equality split a 9-frame card
+            # into runs of 2 - which then looked exactly like dialogue. The bar
+            # is 0.9, not the 0.82 used for cue merging: here a false match
+            # glues two different subtitle lines into one run, and a long enough
+            # chain of them would be dropped as furniture.
+            j = i
+            while j + 1 < m and texts[j + 1] and similar(texts[j], texts[j + 1], 0.9):
+                j += 1
+            runs.append((k, i, j))
+            best = max(best, j - i + 1)
+            i = j + 1
+        stats[k] = {"run": best, "present": present, "share": present / float(n)}
+    if len(stats) < 2:
+        return set(), {}
+
+    steady = [v["run"] for v in stats.values() if v["share"] >= 0.2]
+    if not steady:
+        return set(), {}
+    floor = max(5.0 * max(fps, 0.01), 2.5 * min(steady))
+
+    drop = set()
+    worst = None
+    for k, i, j in runs:
+        if j - i + 1 <= floor:
+            continue
+        drop.update(t for t in seq[k][i:j + 1] if t)
+        if worst is None or (j - i + 1) > worst["run"]:
+            worst = {"run": j - i + 1, "slot": k, "frame": i}
+    # Never return "everything is furniture": that would empty the transcript.
+    on_screen = {t for texts in seq.values() for t in texts if t}
+    if not drop or not (on_screen - drop):
+        return set(), {}
+
+    sample = ""
+    for g in frame_lines[worst["frame"]]:
+        if g["key"] == worst["slot"]:
+            sample = g["text"]
+            break
+    report = {"texts": len(drop), "slots": len(stats),
+              "run_frames": worst["run"],
+              "run_seconds": round(worst["run"] / max(fps, 0.01), 1),
+              "sample": sample}
+    return drop, report
 
 
 def calibrate(samples, height_of):
@@ -352,6 +515,16 @@ def build_md(tag, meta, segs, stats):
     if meta["low_conf"]:
         head.append("- 有 %d 条的识别置信度低于 0.60，行尾标了 `[?]`，建议对照听一遍。\n"
                     % meta["low_conf"])
+    if meta.get("translations"):
+        head.append("- 双语字幕：只保留 %s 的行，略去 %d 行译文/外文行"
+                    "（换 `--language` 可切换）。\n"
+                    % (meta.get("language") or "目标语言", meta["translations"]))
+    if meta.get("furniture"):
+        f = meta["furniture"]
+        head.append("- 字幕带里另有固定文案（最长的一段连续 %d 帧、约 %.0f 秒一字不变，"
+                    "例如「%s」），已剔除 %d 段，未计入正文。\n"
+                    % (f["run_frames"], f["run_seconds"], f.get("sample") or "",
+                       f["texts"]))
     if meta["duration"] and stats["coverage"] is not None and stats["coverage"] < 0.5:
         head.append("- 只覆盖了 %.0f%% 的时长：中间可能没有字幕，也可能漏读了。\n"
                     % (stats["coverage"] * 100))
@@ -430,6 +603,10 @@ def read_video(path, engine, cfg, progress=None):
         top, bot = ((cfg["region"][0], cfg["region"][1]) if band is None
                     else (band["y0"], band["y1"]))
         keep_top, keep_bot = (top, bot) if band is None else band["core"]
+        # One slot size for every frame, taken from the band's own median line
+        # height. See lines_of() for what goes wrong when it is derived per frame.
+        bucket = max(band["mean_h"] * 0.5, 0.004) if band else None
+        per_frame = []
         for idx, fp in enumerate(frames):
             img = Image.open(fp)
             H = img.size[1]
@@ -449,16 +626,31 @@ def read_video(path, engine, cfg, progress=None):
             floor = band.get("size_floor") if band else None
             if floor:
                 inside = [b for b in inside if (b["y1"] - b["y0"]) / H >= floor]
-            text, conf = reading_of(inside, H)
-            readings.append((idx / fps, text, conf))
+            per_frame.append(lines_of(inside, H, bucket))
             img.close()
             if progress and (idx % 20 == 0 or idx == len(frames) - 1):
                 progress(idx + 1, len(frames))
+
+        # Which slots are dialogue, and which are slide copy that happens to sit
+        # inside the band. Skipped without a band: the slot size is per frame
+        # then, so the runs would not line up.
+        drop, furn = furniture_texts(per_frame, fps) if bucket else (set(), {})
+        translations = 0
+        for idx, lines in enumerate(per_frame):
+            if drop:
+                lines = [g for g in lines if norm_key(g["text"]) not in drop]
+            kept, rest = pick_lines(lines, cfg["language"])
+            translations += len(rest)
+            scores = sorted(g["conf"] for g in kept)
+            readings.append((idx / fps,
+                             tighten(" ".join(g["text"] for g in kept)),
+                             scores[len(scores) // 2] if scores else 0.0))
         segs = build_segments(readings, half, duration)
         return {"segments": segs, "duration": duration, "duration_source": "container",
                 "band": band, "band_used": [round(top, 4), round(bot, 4)],
                 "frames": len(frames), "fps": round(fps, 3), "note": note,
-                "hits": sum(1 for r in readings if r[1]), "info": info}
+                "hits": sum(1 for r in readings if r[1]), "info": info,
+                "furniture": furn, "translations": translations}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -515,7 +707,10 @@ def process_one(path, engine, opts):
     label = "画面硬字幕（OCR 逐帧识别）"
     meta = {"source_label": label, "duration": duration, "chars": len(body),
             "fps": got["fps"], "frames": got["frames"],
-            "band": got["band_used"], "hits": got["hits"], "low_conf": low}
+            "band": got["band_used"], "hits": got["hits"], "low_conf": low,
+            "furniture": got.get("furniture") or {},
+            "translations": got.get("translations", 0),
+            "language": opts["language"]}
     data = {
         "tag": key, "engine": "ocr", "source_track": None, "sidecar": None,
         "source_label": label,
@@ -526,7 +721,9 @@ def process_one(path, engine, opts):
         "params": {"ocr": "RapidOCR / PP-OCR (onnxruntime)", "fps": got["fps"],
                    "frames": got["frames"], "sample_width": SAMPLE_W,
                    "region": list(opts["region"]), "band": got["band_used"],
-                   "min_score": opts["min_score"], "note": got["note"]},
+                   "min_score": opts["min_score"], "note": got["note"],
+                   "furniture": got.get("furniture") or {},
+                   "translations_dropped": got.get("translations", 0)},
         "timestamps": True, "segments": segs, "text": body, "chars": len(body),
         "stats": stats, "error": None,
     }
@@ -561,7 +758,7 @@ def list_one(path, engine, opts):
             boxes = ocr_boxes(engine, img, opts["region"][0],
                               opts["region"][1], opts["min_score"])
             samples.append({"boxes": boxes})
-            got, _ = reading_of(boxes, img.size[1])
+            got, _ = reading_of(boxes, img.size[1], opts["language"])
             if got:
                 texts.append(got)
             img.close()
@@ -601,7 +798,10 @@ def main():
                     help="vertical search window as fractions, default 0.50,0.995")
     ap.add_argument("--min-score", type=float, default=0.5,
                     help="drop OCR lines below this confidence (default 0.5)")
-    ap.add_argument("--language", default="zh", help="recorded in the JSON, not used for OCR")
+    ap.add_argument("--language", default="zh",
+                    help="which line to keep when the subtitle is bilingual: "
+                         "zh keeps the Chinese line and drops the translation, "
+                         "en the other way round")
     ap.add_argument("--no-band", action="store_true",
                     help="skip band detection and read the whole --region "
                          "(debugging; pulls in titles and watermarks)")

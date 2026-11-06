@@ -77,6 +77,93 @@ def case_similar():
     ok(not ocr.similar("", "你好"), "empty never matches")
 
 
+def case_lines_of():
+    # Two physical lines; the upper one arrives as two boxes, out of order.
+    upper = [box("把出行需求", 0.62, H=1000), box("可以帮用户", 0.62, H=1000)]
+    upper[0]["x0"], upper[0]["x1"] = 200.0, 400.0       # "把出行需求" sits right
+    upper[1]["x0"], upper[1]["x1"] = 0.0, 200.0         # "可以帮用户" sits left
+    lines = ocr.lines_of(upper + [box("亮点1：项目来自真正的业务场景", 0.66, H=1000)], 1000)
+    eq(len(lines), 2, "two y positions -> two lines")
+    eq(lines[0]["text"], "可以帮用户把出行需求", "one line is read left to right")
+    eq(lines[1]["text"], "亮点1：项目来自真正的业务场景", "and the lines are ordered top to bottom")
+    ok(lines[0]["key"] != lines[1]["key"], "each line gets its own y slot")
+    eq(ocr.lines_of([], 1000), [], "no boxes -> no lines")
+
+
+def case_pick_lines():
+    zh, en = "你会如何设计治理方案呢", "How would you design a governance plan?"
+    lines = [{"key": 40, "text": zh, "conf": 0.9}, {"key": 44, "text": en, "conf": 0.8}]
+    kept, dropped = ocr.pick_lines(lines, "zh")
+    eq([g["text"] for g in kept], [zh], "zh keeps the Chinese line")
+    eq([g["text"] for g in dropped], [en], "and drops the translation")
+
+    kept, dropped = ocr.pick_lines(lines, "en")
+    eq([g["text"] for g in kept], [en], "en keeps the English line")
+    eq(len(dropped), 1, "and drops the Chinese one")
+
+    # A Chinese subtitle can be mostly Latin letters; a ratio test would lose it.
+    term = [{"key": 40, "text": "Top K 和 Top N 到底如何取值", "conf": 0.9},
+            {"key": 44, "text": "What values should Top K and Top N take?", "conf": 0.8}]
+    eq([g["text"] for g in ocr.pick_lines(term, "zh")[0]],
+       ["Top K 和 Top N 到底如何取值"], "a term-heavy Chinese line still counts as Chinese")
+
+    # A wrong --language must not empty the transcript.
+    eq(len(ocr.pick_lines([{"key": 40, "text": en, "conf": 0.9}], "zh")[0]), 1,
+       "nothing matches -> keep everything")
+    eq(len(ocr.pick_lines(lines, None)[0]), 2, "no language -> keep everything")
+
+    text, _ = ocr.reading_of(
+        [box(zh, 0.60, H=1000), box(en, 0.64, H=1000)], 1000, "zh")
+    eq(text, zh, "reading_of filters in the same breath")
+
+
+def case_furniture():
+    def seq(slots, n):
+        """n frames; slots maps a y-slot to the text it carries each frame."""
+        out = []
+        for i in range(n):
+            out.append([{"key": k, "text": v(i) if callable(v) else v, "conf": 0.9}
+                        for k, v in slots.items()])
+        return out
+
+    # Dialogue changes every second; the bullet block under it does not.
+    frames = seq({40: lambda i: "第%d句口播" % i, 44: "亮点1：项目来自真正的业务场景"}, 12)
+    drop, report = ocr.furniture_texts(frames, 1.0)
+    eq(drop, {ocr.norm_key("亮点1：项目来自真正的业务场景")}, "the held line is dropped")
+    ok(not any(ocr.norm_key("第%d句口播" % i) in drop for i in range(12)),
+       "the changing line survives")
+    eq(report["run_frames"], 12, "and its run length is reported")
+
+    # Spacing inside the block is OCR noise, not a change.
+    frames = seq({40: lambda i: "第%d句" % i, 44: lambda i: "亮点 1" if i % 2 else "亮点1"}, 12)
+    eq(ocr.furniture_texts(frames, 1.0)[0], {"亮点1"},
+       "spacing and case do not break a run")
+
+    # The head of a slot can be reused: long-held chapter cards, with a real
+    # sentence flashed between them. Drop the runs, keep the sentence.
+    script = ["章节点"] * 8 + ["发票要寄到上海办公室"] * 2 + ["章节点"] * 8
+    frames = seq({40: lambda i: "第%d句" % i, 44: lambda i: script[i]}, len(script))
+    drop, _ = ocr.furniture_texts(frames, 1.0)
+    eq(drop, {ocr.norm_key("章节点")}, "the long run is dropped")
+    ok(ocr.norm_key("发票要寄到上海办公室") not in drop,
+       "a short line sharing the same slot survives")
+
+    # A clip where everything is held: no fast line to compare against, so
+    # nothing is removed. Silence is not evidence of furniture.
+    frames = seq({40: "第一章", 44: "第一节"}, 12)
+    eq(ocr.furniture_texts(frames, 1.0), (set(), {}), "all lines held -> drop nothing")
+
+    # Two-line subtitles change together and must both survive. "Empty drop
+    # set" is how the function says "nothing filtered" - read_video only prunes
+    # when the set is non-empty.
+    frames = seq({40: lambda i: "上半句%d" % i, 44: lambda i: "下半句%d" % i}, 12)
+    eq(ocr.furniture_texts(frames, 1.0), (set(), {}),
+       "wrapped subtitle lines both survive")
+
+    eq(ocr.furniture_texts(seq({40: "只有一行"}, 12), 1.0), (set(), {}),
+       "a single slot is never furniture")
+
+
 def case_reading_of():
     # Deliberately out of reading order, and the second line is further right.
     boxes = [box("下降", 0.80), box("第三条数据它的得分陡然", 0.76)]
@@ -242,6 +329,9 @@ def main():
     case_tighten()
     case_norm_key()
     case_similar()
+    case_lines_of()
+    case_pick_lines()
+    case_furniture()
     case_reading_of()
     case_band_static_rejected()
     case_band_no_text()
