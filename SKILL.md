@@ -33,7 +33,7 @@ agent_created: true
 | **Agent 工作流** | Skill 指导 Agent 调命令、判读结果、组织复核 | 抽音频、异源方案对照、差异对齐、精编留痕 |
 | **手动** | 必须人工判断 | 首末段回听、建术语表、提供标准答案、商用许可核对 |
 
-> 「文档写了完整流程」≠「工具已自动实现」。**SenseVoice q8 GGUF 只有文档命令、没有对应脚本**，是可选的独立对照方案。批处理已有脚本（`batch_transcribe.py`），但它只做串行四件事，不排队、不并发。详见 README「能力归属」表。
+> 「文档写了完整流程」≠「工具已自动实现」。**SenseVoice q8 GGUF 只有文档命令、没有对应脚本**，是可选的独立对照方案。批处理已有脚本（`batch_transcribe.py`），但它只做串行四件事，不排队、不并发。详见 README「自动化到哪一步」表。
 
 ## 工作流骨架
 
@@ -74,7 +74,7 @@ agent_created: true
 | 要真正跑一条转写、或查看输出 JSON 结构 | `scripts/transcribe.py` |
 | 一次跑一整个文件夹（或多目录） | `scripts/batch_transcribe.py`（先 `--dry-run` 看计划） |
 | 质检报了 ERROR / RED，想知道区别和阈值 | `references/04-quality.md`、`scripts/qc_check.py` |
-| 我的环境算不算已验证、依赖版本要求 | `README.md` §3、`references/06-environment.md` |
+| 我的环境算不算已验证、依赖版本要求 | `README.md`「已知限制」、`references/06-environment.md` |
 | 直接抄命令 | `references/10-commands.md` |
 | 阅读未拆分的完整原文 | `docs/转写经验_通用版.md` |
 
@@ -103,4 +103,4 @@ agent_created: true
 - `scripts/qc_check.py`：输入校验（ERROR）+ 四项粗筛 + 三查硬规则（RED/REVIEW）；无真实时间戳或时间戳无效时时间类指标为 `null` 并标 N/A，duration 无效时明确报「无法检查」；`--json` 始终是严格 JSON。
 - `tests/run_smoke.py`：零依赖回归测试，33 类输入 × 文本/JSON 两种模式，883 条断言；`tests/run_transcribe_unit.py`：回退决策、耗时口径、产物原子写入，43 条断言；`tests/run_batch_unit.py`：批处理键名/碰撞/跳过判据/摘要编码，外加用假 `transcribe.py` 驱动的端到端集成（成功+失败+跳过+修复重试+半成品产物），102 条断言。都不需要网络 / 模型 / GPU。
 
-> 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测配置与已验证范围见 `README.md`。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。版本规划见 `ROADMAP.md`。
+> 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测环境快照见 `references/06-environment.md` §7.1.1，已验证范围见 `README.md`「已知限制」。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。版本规划见 `ROADMAP.md`。

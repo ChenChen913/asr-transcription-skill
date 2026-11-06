@@ -18,6 +18,7 @@
 | **v0.4.2** | **2026-11-06** | 依据第四轮审核区分「能解析」与「时间轴有效」：负起点 / `end < start` / 乱序一律使三个时间指标置 `null`、`has_timestamps=false`，`note` 新增 `INVALID TIMELINE`。测试 33 类 / 881 断言（+18）。 |
 | **v0.5** | **2026-11-06** | C2 落地：新增 `scripts/batch_transcribe.py`（串行、跳过已完成、失败隔离、每文件独立 JSON）+ `tests/run_batch_unit.py`（61 断言）。同时把 B4「不写批处理脚本」的决定显式改口，理由见下。 |
 | **v0.5.1** | **2026-11-06** | 依据第七轮审核修产物一致性：JSON 与 MD 视为**一组**交付物（跳过判据要求两份都完整、`--force` 两份一起进 `.prev`、写入端先改名 MD 后改名 JSON 保证「有 JSON ⇒ 有 MD」）；文档撤回 `--pattern "*.m4a"` 的错误示例并明确只支持 PCM WAV，批量开跑前对非 `.wav` 告警；补端到端批处理集成测试（假 `transcribe.py` 驱动 `main()`）。批处理 61 → 102 断言，transcribe 单测 35 → 43。 |
+| **v0.5.2** | **2026-11-06** | 文档重写：`README.md` 改为中英双语并新增 `README_EN.md`，按标准 README 结构重排（首屏语言切换、目录、Mermaid 流程图、许可证收尾），第三方归属扩为「主链路 / 补充对照 / 仅提及 / 通用工具」四组并留在正文。环境快照从 README 移入 `references/06-environment.md` §7.1.1；能力归属表改名「自动化到哪一步」保留。无代码改动，三套测试仍 883 / 43 / 102。 |
 | **v0.4.3** | **2026-11-06** | 依据第五轮审核修 Windows 可移植性：测试 harness 强制子进程 UTF-8（普通 zh-CN 控制台原本 2 failures）；`--json` 重定向到文件时强制 UTF-8（原本是 GBK，非合法 JSON）；ROADMAP 自检命令改用 `compileall`；移除只影响解码、不产出 `words` 的 `--word-timestamps`；性能表补样本量与时长。测试 33 类 / 883 断言。 |
 
 ### v0.5.1 产物一致性（第七轮审核）

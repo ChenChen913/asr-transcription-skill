@@ -6,8 +6,8 @@
 ## 1. 本仓库的授权范围
 
 `LICENSE` 中的 MIT 许可**仅覆盖**本仓库原有的文档、脚本与 Skill 结构与组织方式，
-即：`SKILL.md`、`README.md`、`ROADMAP.md`、`NOTICE.md`、`references/`、`scripts/`、
-`tests/`、`docs/` 下的原创内容。
+即：`SKILL.md`、`README.md`、`README_EN.md`、`ROADMAP.md`、`NOTICE.md`、
+`references/`、`scripts/`、`tests/`、`docs/` 下的原创内容。
 
 ## 2. 不在授权范围内的部分
 
