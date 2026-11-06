@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Serial batch transcription over one or more folders.
+
+Four properties, and deliberately nothing else (see ROADMAP C2):
+
+  1. serial     - one file at a time, one model instance, no workers, no queue
+  2. skip done  - a file is done when its output JSON is readable and complete;
+                  --force ignores that
+  3. isolation  - one bad file never stops the batch; each failure is recorded
+                  with its exit code and the tail of its error
+  4. per file   - each input gets its own JSON + MD, produced by
+                  scripts/transcribe.py (identical schema to a single run)
+
+No database, no lock file, no retry scheduler. **The output JSON is the state**:
+one source of truth, so a half-finished batch cannot drift out of sync with a
+separate progress file.
+
+Layout of --out-dir:
+
+    <key>.json / <key>.md      one transcript per input
+    <key>.json.prev            previous version, only while a re-run is in
+                               flight or if that re-run failed (never counts as
+                               done, so a failure is retried next time)
+    _batch/summary.json        counts + per-file outcome, rewritten after every
+                               file so a killed batch still leaves a record
+
+Exit codes: 0 all ok/skipped, 1 at least one failed or timed out, 2 bad usage or
+no input matched - same spirit as qc_check.py, so a batch can gate CI.
+"""
+
+import argparse
+import fnmatch
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+TRANSCRIBE = os.path.join(HERE, "transcribe.py")
+SUMMARY_DIR = "_batch"
+SUMMARY_NAME = "summary.json"
+BAD_CHARS = r'[<>:"|?*\\]'
+OK_STATES = ("ok", "skipped")
+
+
+# ---------------------------------------------------------------- planning ---
+
+def clean_key(text):
+    """Turn a relative path into a safe, still readable output stem.
+
+    Separators become __ BEFORE scrubbing illegal characters: a Windows
+    backslash is both a separator and an illegal filename character, and
+    scrubbing first would leave `sub_02` instead of `sub__02`.
+    """
+    key = text.replace("/", "__").replace("\\", "__")
+    key = re.sub(BAD_CHARS, "_", key)
+    key = key.strip().rstrip(".")
+    return key or "clip"
+
+
+def walk_files(root, patterns, recursive):
+    """Files under root matching any pattern. An explicit file path bypasses patterns."""
+    if os.path.isfile(root):
+        return [root]
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        if not recursive:
+            del dirnames[:]
+        for name in sorted(filenames):
+            low = name.lower()
+            if any(fnmatch.fnmatch(low, p.lower()) for p in patterns):
+                found.append(os.path.join(dirpath, name))
+    return found
+
+
+def key_for(path, root):
+    """Relative-to-root stem; subdirectories become __ so output stays flat."""
+    if not os.path.isdir(root) or os.path.abspath(path) == os.path.abspath(root):
+        # root was an explicit file: its own stem, never the relative path "."
+        return clean_key(os.path.splitext(os.path.basename(path))[0])
+    rel = os.path.relpath(path, root)
+    return clean_key(os.path.splitext(rel)[0])
+
+
+def collect(inputs, patterns, recursive, out_dir):
+    """Return [{'src','key','root'}] sorted and de-duplicated.
+
+    Keys are prefixed only when two different sources would collide, so the
+    common single-folder case keeps clean names like `01`.
+    """
+    items, seen = [], set()
+    out_real = os.path.realpath(out_dir)
+    for root in inputs:
+        for src in walk_files(root, patterns, recursive):
+            real = os.path.realpath(src)
+            if real in seen:
+                continue
+            # Never re-ingest our own output when --out-dir sits inside --input.
+            if real.startswith(out_real + os.sep):
+                continue
+            seen.add(real)
+            items.append({"src": src, "key": key_for(src, root), "root": root})
+
+    by_key = {}
+    for it in items:
+        by_key.setdefault(it["key"], []).append(it)
+    for key, group in by_key.items():
+        if len(group) == 1:
+            continue
+        for it in group:
+            base = os.path.basename(os.path.abspath(
+                it["root"] if os.path.isdir(it["root"]) else os.path.dirname(it["root"])))
+            it["key"] = clean_key("%s__%s" % (base, key))
+
+    used = {}
+    for it in items:                       # last resort: identical folder names
+        if it["key"] in used:
+            used[it["key"]] += 1
+            it["key"] = clean_key("%s__%d" % (it["key"], used[it["key"]]))
+        else:
+            used[it["key"]] = 1
+    return items
+
+
+# -------------------------------------------------------------- done check ---
+
+def is_done(json_path):
+    """(done, reason). 'Done' means the previous output is readable and complete.
+
+    A truncated JSON (process killed mid-write) fails to parse -> re-run. An
+    empty segments list is legitimate (silent audio), so it counts as done; that
+    is a quality question for qc_check.py, not a reason to transcribe again.
+    """
+    if not os.path.exists(json_path):
+        return False, "no output yet"
+    try:
+        if os.path.getsize(json_path) <= 0:
+            return False, "output is empty"
+        with open(json_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        return False, "unreadable output (%s)" % exc
+    if not isinstance(data, dict):
+        return False, "output is not a JSON object"
+    if data.get("error"):
+        return False, "previous run recorded an error"
+    if not isinstance(data.get("segments"), list) or "duration" not in data:
+        return False, "output is missing segments/duration"
+    return True, ""
+
+
+# ----------------------------------------------------------------- running ---
+
+def build_cmd(py, script, src, out_json, key, opts):
+    """Command for one file. -X utf8 is explicit: it is not inherited from the parent."""
+    cmd = [py, "-X", "utf8", script,
+           "--wav", src, "--model", opts["model"], "--out", out_json,
+           "--tag", key, "--device", opts["device"], "--language", opts["language"]]
+    if opts.get("compute"):
+        cmd += ["--compute", opts["compute"]]
+    return cmd
+
+
+def child_env():
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def tail(text, limit=900):
+    lines = [ln for ln in (text or "").strip().splitlines() if ln.strip()]
+    return "\n".join(lines[-12:])[-limit:]
+
+
+def read_metrics(json_path):
+    try:
+        with open(json_path, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except Exception:
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {"audio_s": d.get("duration"), "device": d.get("device"),
+            "rtf_x": d.get("rtf_x"), "load_s": d.get("load_s"),
+            "asr_s": d.get("asr_s"), "fallback": bool(d.get("fallback"))}
+
+
+def stage_aside(json_path):
+    """Move an existing output to .prev before a re-run.
+
+    Otherwise a failed --force run would leave the old JSON in place, is_done()
+    would say 'done' next time and the file would be skipped forever.
+    """
+    prev = json_path + ".prev"
+    try:
+        if os.path.exists(json_path):
+            os.replace(json_path, prev)
+    except OSError:
+        pass
+
+
+def drop_prev(json_path):
+    try:
+        if os.path.exists(json_path + ".prev"):
+            os.remove(json_path + ".prev")
+    except OSError:
+        pass
+
+
+def run_one(src, out_json, key, opts):
+    """Transcribe a single file. Never raises: every outcome becomes a status."""
+    rec = {"status": "failed", "exit_code": None, "wall_s": 0.0, "error": ""}
+    if not os.path.exists(src):
+        rec["error"] = "input disappeared before it was processed"
+        return rec
+    stage_aside(out_json)
+    cmd = build_cmd(opts["python"], opts["script"], src, out_json, key, opts)
+    started = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=opts["timeout"],
+                              env=child_env())
+    except subprocess.TimeoutExpired:
+        rec["status"] = "timeout"
+        rec["wall_s"] = round(time.time() - started, 2)
+        rec["error"] = "exceeded --timeout %ss" % opts["timeout"]
+        return rec
+    except Exception as exc:
+        rec["wall_s"] = round(time.time() - started, 2)
+        rec["error"] = "could not start transcribe.py: %s" % exc
+        return rec
+
+    rec["wall_s"] = round(time.time() - started, 2)
+    rec["exit_code"] = proc.returncode
+    if proc.returncode == 0 and is_done(out_json)[0]:
+        rec["status"] = "ok"
+        rec.update(read_metrics(out_json))
+        drop_prev(out_json)
+        return rec
+    stderr = proc.stderr.decode("utf-8", "replace")
+    stdout = proc.stdout.decode("utf-8", "replace")
+    rec["error"] = (tail(stderr) or tail(stdout)
+                    or "exit code %d, no message" % proc.returncode)
+    return rec
+
+
+# ------------------------------------------------------------------ output ---
+
+def write_json_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def counts_of(records):
+    out = {"total": len(records), "ok": 0, "skipped": 0, "failed": 0, "timeout": 0}
+    for rec in records:
+        out[rec["status"]] = out.get(rec["status"], 0) + 1
+    return out
+
+
+def fmt_line(idx, total, rec):
+    head = "[%*d/%d]" % (len(str(total)), idx, total)
+    name = os.path.basename(rec["src"])
+    if len(name) > 34:
+        name = name[:31] + "..."
+    if rec["status"] in OK_STATES:
+        extra = []
+        if rec.get("audio_s"):
+            extra.append("audio=%.1fs" % rec["audio_s"])
+        if rec.get("rtf_x"):
+            extra.append("rtf=%.2fx" % rec["rtf_x"])
+        if rec.get("fallback"):
+            extra.append("cpu-fallback")
+        return "%s %-7s %-34s %6.1fs  %s" % (head, rec["status"], name,
+                                            rec["wall_s"], " ".join(extra))
+    first = (rec.get("error") or "").splitlines()
+    reason = first[-1].strip() if first else ""
+    return "%s %-7s %-34s exit=%s  %s" % (head, rec["status"].upper(), name,
+                                          rec["exit_code"], reason[:110])
+
+
+def payload(records, meta, finished, elapsed):
+    return {
+        "schema": 1, "finished": finished,
+        "started_at": meta["started_at"],
+        "finished_at": meta["finished_at"] if finished else None,
+        "elapsed_s": round(elapsed, 1),
+        "model": meta["model"], "device": meta["device"],
+        "compute": meta["compute"], "language": meta["language"],
+        "pattern": meta["pattern"], "recursive": meta["recursive"],
+        "out_dir": meta["out_dir"],
+        "counts": counts_of(records),
+        "results": [{"src": r["src"], "key": r["key"],
+                     "out_json": os.path.relpath(r["out_json"], meta["out_dir"]),
+                     "status": r["status"], "exit_code": r["exit_code"],
+                     "wall_s": r["wall_s"], "audio_s": r.get("audio_s"),
+                     "device": r.get("device"), "rtf_x": r.get("rtf_x"),
+                     "fallback": r.get("fallback", False),
+                     "error": r["error"]} for r in records],
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Transcribe every audio file in one or more folders, serially.")
+    ap.add_argument("--input", nargs="+", required=True,
+                    help="folder(s) or explicit file(s)")
+    ap.add_argument("--out-dir", required=True,
+                    help="where <key>.json / <key>.md go (also holds _batch/summary.json)")
+    ap.add_argument("--model", default="", help="CTranslate2 model dir (required unless --dry-run)")
+    ap.add_argument("--pattern", nargs="+", default=["*.wav"],
+                    help="filename patterns, case-insensitive (default: *.wav)")
+    ap.add_argument("--recursive", action="store_true", help="descend into subfolders")
+    ap.add_argument("--force", action="store_true", help="re-run even if output exists")
+    ap.add_argument("--dry-run", action="store_true", help="list the plan, run nothing")
+    ap.add_argument("--timeout", type=int, default=1800, help="per file, seconds")
+    ap.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    ap.add_argument("--compute", default=None)
+    ap.add_argument("--language", default="zh")
+    a = ap.parse_args()
+
+    if not a.dry_run and not a.model:
+        ap.error("--model is required (or use --dry-run to only list the plan)")
+    if not a.dry_run and not os.path.exists(TRANSCRIBE):
+        ap.error("transcribe.py not found next to this script: %s" % TRANSCRIBE)
+    try:
+        if not a.dry_run:
+            os.makedirs(a.out_dir, exist_ok=True)
+    except OSError as exc:
+        print("[ERROR] cannot create --out-dir %s: %s" % (a.out_dir, exc))
+        sys.exit(2)
+
+    items = collect(a.input, a.pattern, a.recursive, a.out_dir)
+    if not items:
+        print("[ERROR] no file matched %s under: %s"
+              % (" ".join(a.pattern), ", ".join(a.input)))
+        sys.exit(2)
+
+    plan = []
+    for it in items:
+        out_json = os.path.join(a.out_dir, it["key"] + ".json")
+        done, why = (False, "forced") if a.force else is_done(out_json)
+        rec = {"src": it["src"], "key": it["key"], "out_json": out_json,
+               "status": "skipped" if done else "pending",
+               "skip_reason": why if done else "",
+               "exit_code": None, "wall_s": 0.0, "error": ""}
+        if done:
+            # Keep the summary informative even when nothing ran this time.
+            rec.update(read_metrics(out_json))
+        plan.append(rec)
+
+    todo = [p for p in plan if p["status"] == "pending"]
+    print("inputs   : %s" % ", ".join(a.input))
+    print("pattern  : %s%s" % (" ".join(a.pattern),
+                               "  (recursive)" if a.recursive else ""))
+    print("out-dir  : %s" % os.path.abspath(a.out_dir))
+    print("files    : %d matched, %d to run, %d already done"
+          % (len(plan), len(todo), len(plan) - len(todo)))
+    if a.dry_run:
+        for p in plan:
+            mark = "skip" if p["status"] == "skipped" else "run "
+            print("  %s  %-40s -> %s" % (mark, p["src"],
+                                         os.path.basename(p["out_json"])))
+        print("dry run: nothing executed.")
+        return
+
+    opts = {"model": a.model, "device": a.device, "compute": a.compute,
+            "language": a.language, "timeout": a.timeout,
+            "python": sys.executable, "script": TRANSCRIBE}
+    meta = {"started_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "finished_at": None,
+            "model": os.path.basename(a.model.rstrip("/\\")), "device": a.device,
+            "compute": a.compute, "language": a.language, "pattern": a.pattern,
+            "recursive": a.recursive, "out_dir": os.path.abspath(a.out_dir)}
+    summary_path = os.path.join(a.out_dir, SUMMARY_DIR, SUMMARY_NAME)
+
+    t0 = time.time()
+    records = []
+    total = len(plan)
+    interactive = sys.stdout.isatty()
+    for idx, p in enumerate(plan, 1):
+        if p["status"] == "skipped":
+            print(fmt_line(idx, total, p))
+            records.append(p)
+            continue
+        if interactive:
+            print("%s ..." % ("[%*d/%d]" % (len(str(total)), idx, total)),
+                  end="", flush=True)
+        p.update(run_one(p["src"], p["out_json"], p["key"], opts))
+        records.append(p)
+        if interactive:
+            print("\r" + fmt_line(idx, total, p) + " " * 12)
+        else:
+            print(fmt_line(idx, total, p))
+        meta["finished_at"] = None
+        write_json_atomic(summary_path,
+                          payload(records, meta, False, time.time() - t0))
+
+    c = counts_of(records)
+    meta["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    write_json_atomic(summary_path, payload(records, meta, True, time.time() - t0))
+
+    print("")
+    print("done: %d ok, %d skipped, %d failed, %d timeout  (%.1fs)"
+          % (c["ok"], c["skipped"], c["failed"], c["timeout"], time.time() - t0))
+    print("summary: %s" % summary_path)
+    if c["failed"] or c["timeout"]:
+        print("re-run the same command to retry only the failures "
+              "(finished files are skipped).")
+        sys.exit(1)
+    print("next: python %s \"%s\""
+          % (os.path.join(HERE, "qc_check.py"), os.path.join(a.out_dir, "*.json")))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure") and not sys.stdout.isatty():
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    main()

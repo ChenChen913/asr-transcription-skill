@@ -39,6 +39,19 @@ python tests/run_smoke.py
 
 > `qc_check.py` 退出码 1 = 有 ERROR 或 RED/REVIEW（**需人工复核，不等于判错**），0 = 无需复核。阈值严格大于：`gap > 8.00 s`、`overrun > 0.50 s`；可用 `--gap 10` / `--tail 15` 调整。分级含义见 `04-quality.md` §5.2.1。
 
+### 整文件夹批量跑（串行）
+
+```bash
+python scripts/batch_transcribe.py --input "素材A" --out-dir "out" --model "<模型目录>"
+python scripts/batch_transcribe.py --input "素材A" "素材B" --out-dir "out" --model "<模型目录>"
+python scripts/batch_transcribe.py --input "素材A" --out-dir "out" --model "<模型目录>" --recursive
+python scripts/batch_transcribe.py --input "素材A" --out-dir "out" --model "<模型目录>" --dry-run
+python scripts/batch_transcribe.py --input "素材A" --out-dir "out" --model "<模型目录>" --force
+python scripts/qc_check.py "out/*.json"        # 摘要不在 out/ 根下，不会被误报
+```
+
+> 默认只收 `*.wav`（流程上仍建议先用 FFmpeg 统一成 16 kHz 单声道）。子目录要 `--recursive`；确需别的扩展名用 `--pattern "*.wav" "*.m4a"`，但先拿一条试通再上批量。重跑同一条命令只重试失败项；`--timeout` 默认 1800 s/文件。
+
 ### Windows PowerShell 写法
 
 > 上面的代码块是 bash 语法。Windows PowerShell 5.1 不支持 `VAR=value cmd` 和 `&&`；对应写法如下。

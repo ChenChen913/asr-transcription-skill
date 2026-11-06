@@ -16,7 +16,30 @@
 | **v0.4** | **2026-11-06** | 依据第三轮审核做运行时健壮性：非有限数值校验、DLL 句柄存活、无效时间戳不参与统计、严格 JSON 输出、回退收窄、耗时口径。测试扩到 33 类 / 863 条断言，另加 35 条断言的回退单测。 |
 | v0.4.1 | 2026-11-06 | 许可证打包修正：`LICENSE` 去掉正文后的附加段落（GitHub 因此识别为 `NOASSERTION`），恢复为纯 MIT 正文；授权范围、第三方归属与「不含模型权重/音频」声明移入新建的 `NOTICE.md`。无代码改动。 |
 | **v0.4.2** | **2026-11-06** | 依据第四轮审核区分「能解析」与「时间轴有效」：负起点 / `end < start` / 乱序一律使三个时间指标置 `null`、`has_timestamps=false`，`note` 新增 `INVALID TIMELINE`。测试 33 类 / 881 断言（+18）。 |
+| **v0.5** | **2026-11-06** | C2 落地：新增 `scripts/batch_transcribe.py`（串行、跳过已完成、失败隔离、每文件独立 JSON）+ `tests/run_batch_unit.py`（61 断言）。同时把 B4「不写批处理脚本」的决定显式改口，理由见下。 |
 | **v0.4.3** | **2026-11-06** | 依据第五轮审核修 Windows 可移植性：测试 harness 强制子进程 UTF-8（普通 zh-CN 控制台原本 2 failures）；`--json` 重定向到文件时强制 UTF-8（原本是 GBK，非合法 JSON）；ROADMAP 自检命令改用 `compileall`；移除只影响解码、不产出 `words` 的 `--word-timestamps`；性能表补样本量与时长。测试 33 类 / 883 断言。 |
+
+### v0.5 串行批处理（第六轮反馈 → C2 到期）
+
+| 项 | 结果 |
+|---|---|
+| 触发 | 使用者反馈「为了跑 8 条自己写了约 50 行循环，给两个文件夹它不会自己遍历」。这正好命中 C2 自己写的触发条件（「明确出现一次要处理很多文件的需求」），属于**计划内项到期**，不是临时加功能。 |
+| 新增 | `scripts/batch_transcribe.py`：多目录 / 多模式收集 → 串行逐条调 `transcribe.py` → 每文件独立 JSON + MD → `_batch/summary.json` 每处理完一个就落盘。零新依赖。 |
+| 只做四件事 | ① **串行**：一次一个模型实例，不并发（也符合「GPU 与 CPU 不并发」的硬约束）；② **跳过已完成**：判据＝输出 JSON 可解析、无 `error`、含 `segments` 与 `duration`；③ **失败隔离**：单文件非零退出 / 超时只记一笔，不影响其余；④ **每文件独立 JSON**：与单跑同 schema，可直接喂 `qc_check.py`。 |
+| 明确不做 | 任务队列、并发、锁文件、重试调度、数据库、目录级汇总指标。**状态只有一个来源：输出 JSON 本身**，不引入第二份进度文件——两份状态一定会漂移。 |
+| 几个不显然的决定 | ① 摘要写 `out/_batch/summary.json` 而不是 `out/`：否则 `qc_check.py "out/*.json"` 会把摘要当成没有 segments 的坏稿报 ERROR（已实测确认）。② 重跑前把旧输出改名为 `<key>.json.prev`：否则 `--force` 失败会留下旧 JSON，下一轮被判「已完成」而**永久跳过**该文件。③ 跳过项从旧 JSON 回填时长/倍率，摘要不至于只剩一个 `skipped`。④ 子进程显式 `-X utf8` + `PYTHONUTF8`，沿用 v0.4.3 的教训（`-X` 不会被继承）。⑤ 非 TTY 时输出重定向，进度行不写 `\r`，日志可读。 |
+| 验证（真机） | 3 个文件（正常 / 坏 WAV / 中文名含空格）：首轮 2 ok + 1 failed（exit 2，错误原文进摘要）+ 进程退出码 1；次轮 2 skipped + 1 重试（0.4 s 完成跳过）；修好坏文件后该文件转为 ok；`--force` 重跑不留 `.prev`；`--timeout 1` 得 `timeout` 且不留残 JSON；`out/*.json` 喂 qc → 3 文件 0 ERROR。 |
+| 验证（离线） | `tests/run_batch_unit.py` 61 断言：键名派生（含 Windows 反斜杠）、跨目录同名碰撞、跳过判据（缺失/空/截断/带 error/非对象/空 segments）、`.prev` 轮转、摘要 UTF-8、`--dry-run` 退出码、缺 `--model` 退出码 2。不需要模型 / GPU / 网络。 |
+| 未做 | 目录级汇总报表、SRT 导出、并发、把失败也写进**单文件** JSON（C4 目前只被批量场景覆盖）。 |
+
+#### v0.5 中「改了主意」的部分
+
+B4（v0.3）当时写的是「**不写批处理脚本**」，理由是审核建议 P1-7 与它自己「保持轻量」的原则冲突。现在改口，原因写清楚，不悄悄删：
+
+1. **那条判断的前提没了**：当时没有真实批量需求，属于「假设的便利」；现在需求出现，而且使用者已经自己写了 50 行循环补上——说明缺口成本 > 脚本成本。
+2. **规模可控**：单文件、零新依赖、430 行（含注释，与 `qc_check.py` 同量级）、不改单文件路径的任何行为。
+3. **不是反复**：C2 本来就写了触发条件，触发即执行；反过来，若一直不触发，这个脚本就不该存在。
+4. **当时的顾虑保留**：不上并发、不上队列、不做调度，功能面就停在「串行 + 跳过 + 隔离 + 独立产物」四件事。
 
 ### v0.3 阶段 A（P0，已全部完成）
 
@@ -37,7 +60,7 @@
 | B1 决策入口 | `SKILL.md` 加「方案分层与决策入口」（默认推荐 / 备用可选 / 实验性）；`references/01-selection.md` §1.0 落地**五问决策表**（有无 GPU → 资源够不够 → 要快还是要准 → 要不要异源交叉 → 主方案失败怎么办），并再次强调 turbo 与 large-v3 同源、不算独立验证。**未新增任何模型。** |
 | B2 Quick Start | `README.md` §0 新增 6 步最短路径；命令与 `transcribe.py` / `check_env.py` / `qc_check.py` / `run_smoke.py` 的实参逐条核对；附输出位置与格式、排查入口。 |
 | B3 安装说明 | `README.md` §6 收敛为「通用 Skill 结构约定 + WorkBuddy 已验证 + 其他工具按各自文档放置、不声称已兼容 + 安装后 5 条自检清单」。不虚构任何未测工具的兼容性。 |
-| B4 明确不做 | **不写批处理脚本**。审核建议 P1-7 与其自身「保持轻量／不要急于加功能」原则冲突；本轮只在能力表标明「批处理是 Agent 工作流，脚本未实现」。 |
+| B4 明确不做 | **不写批处理脚本**。审核建议 P1-7 与其自身「保持轻量／不要急于加功能」原则冲突；本轮只在能力表标明「批处理是 Agent 工作流，脚本未实现」。**v0.5 已改口**（真实批量需求出现），原因见上文 v0.5 专节。 |
 
 ### v0.3 中「没照单全收」的部分
 
@@ -66,7 +89,8 @@
 
 | 项 | 结果 |
 |---|---|
-| W1 测试 harness 编码 | 复现：清空 `PYTHONUTF8` / `PYTHONIOENCODING` 后 `python tests/run_smoke.py` → **2 failures**（`no_duration` 找不到中文诊断）。原因：子进程 stdout 是 cp936，harness 按 UTF-8 解码 + `errors="replace"`，中文变 U+FFFD。修复：子进程显式 `-X utf8` + `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`（`-X utf8` 不会被继承，必须显式传）。三环境复验：默认 / 清空变量 / `PYTHONUTF8=0` 均 **883 断言 0 失败**。 |
+| W1 测试 harness 编码 | 复现：清空 `PYTHONUTF8` / `PYTHONIOENCODING` 后 `python tests/run_smoke.py
+python tests/run_smoke.py` → **2 failures**（`no_duration` 找不到中文诊断）。原因：子进程 stdout 是 cp936，harness 按 UTF-8 解码 + `errors="replace"`，中文变 U+FFFD。修复：子进程显式 `-X utf8` + `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`（`-X utf8` 不会被继承，必须显式传）。三环境复验：默认 / 清空变量 / `PYTHONUTF8=0` 均 **883 断言 0 失败**。 |
 | W1b 教训 | 之前多次报「全绿」是在 `PYTHONUTF8=1` 的注入环境下跑的，属于**假绿**。自检清单已加一条：必须在清空这两个变量的情况下再跑一遍。 |
 | W2 `--json` 编码（审核未提，同族问题） | 复现：legacy 编码下 `qc_check.py --json > report.json` 写出的是 **GBK 字节**，`json.load(encoding="utf-8")` 失败、jq 拒绝——`--json` 声称「严格 JSON」，编码却不合法。修复：非 TTY 输出时 `sys.stdout.reconfigure(encoding="utf-8")`；控制台（TTY）保持本机代码页，中文诊断照常显示。新增 2 条断言（可解码 + 可 `json.loads`）。 |
 | W3 自检命令 | `python -m py_compile scripts/*.py tests/*.py` 依赖 shell 展开通配，Windows shell 下报 `[Errno 22] Invalid argument`。改为 `python -m compileall -q scripts tests`。 |
@@ -118,17 +142,22 @@
 
 **条件满足后只做骨架**：公开评测脚本与数据格式，音频由使用者自备；不把少量样本的指标包装成普遍准确率结论。
 
-### C2 批量处理与断点续跑
+### C2 批量处理与断点续跑（✅ 已于 v0.5 实现）
 
-触发条件：明确出现「一次要处理很多文件」的真实需求。届时先做**可靠的串行批处理**（跳过已成功项、失败隔离、独立结果目录），不上任务队列 / 数据库 / 并发调度。当前 `references/02-workflow.md` 已有工程要点，够 Agent 手工组织。
+触发条件：明确出现「一次要处理很多文件」的真实需求。**2026-11-06 触发**，已交付 `scripts/batch_transcribe.py`：串行、跳过已成功项、失败隔离、每文件独立结果，**没有**任务队列 / 数据库 / 并发调度。细节与验证见上文 v0.5 专节。
+
+下一步（未排期，等真实需要再说）：目录级汇总报表、按目录分组的 qc 汇总。
 
 ### C3 能力扩展（不排期）
 
 词级时间戳、说话人分离、SRT/VTT 导出、更细的音频预处理、更多硬件后端。每一项都会增加依赖与维护成本，**先确认是否服务于「转写质量与可靠工作流」这个核心目标**。
 
-### C4 失败也落盘（触发条件：出现批量跑需求）
+### C4 失败也落盘（批量场景 ✅ 已覆盖 / 单文件场景仍待办）
 
-转写失败时目前不产出任何文件，批量场景只能靠「文件不存在」推断失败。触发批处理后补一份最小 JSON（`status` / `error` / `device` / 尝试次数），不改变成功路径的字段。
+转写失败时 `transcribe.py` 本身不产出任何文件，单文件场景只能靠「文件不存在」推断失败。
+
+- **批量场景已解决**：`batch_transcribe.py` 把每个失败文件的退出码、耗时、错误尾部写进 `_batch/summary.json`，并在进程退出码上体现（1 = 有失败）。这就够回答「哪几条没成、为什么」。
+- **单文件场景仍待办**：直接调 `transcribe.py` 失败时依旧无产物。真要补，就补一份最小 JSON（`status` / `error` / `device` / 尝试次数），不改成功路径的字段。等出现「不带批量的失败统计」需求再做。
 
 ---
 
@@ -153,6 +182,7 @@
 ```bash
 python -m compileall -q scripts tests   # 跨 shell 可用；py_compile 的 *.py 通配在 Windows shell 下不展开
 python tests/run_smoke.py
+python tests/run_batch_unit.py            # 批处理：键名 / 跳过判据 / 摘要编码
 # Windows 必做：清空 UTF-8 变量再跑一遍，避免「假绿」
 env -u PYTHONUTF8 -u PYTHONIOENCODING python tests/run_smoke.py
 python scripts/qc_check.py "out/<配置>_<编号>.json" --json

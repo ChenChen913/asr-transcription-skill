@@ -29,11 +29,11 @@ agent_created: true
 
 | 类别 | 含义 | 对应环节 |
 |---|---|---|
-| **已自动化** | 脚本直接产出结果 | `check_env.py` 自检、`transcribe.py` 转写、`qc_check.py` 质检、`run_smoke.py` 测试 |
-| **Agent 工作流** | Skill 指导 Agent 调命令、判读结果、组织复核 | 抽音频、异源方案对照、差异对齐、精编留痕、**批处理** |
+| **已自动化** | 脚本直接产出结果 | `check_env.py` 自检、`transcribe.py` 转写、`batch_transcribe.py` 批量转写、`qc_check.py` 质检、`run_smoke.py` 等测试 |
+| **Agent 工作流** | Skill 指导 Agent 调命令、判读结果、组织复核 | 抽音频、异源方案对照、差异对齐、精编留痕 |
 | **手动** | 必须人工判断 | 首末段回听、建术语表、提供标准答案、商用许可核对 |
 
-> 「文档写了完整流程」≠「工具已自动实现」。**SenseVoice q8 GGUF 只有文档命令、没有对应脚本**，是可选的独立对照方案；批处理同样没有脚本，按 `references/02-workflow.md` 由 Agent 组织。详见 README「能力归属」表。
+> 「文档写了完整流程」≠「工具已自动实现」。**SenseVoice q8 GGUF 只有文档命令、没有对应脚本**，是可选的独立对照方案。批处理已有脚本（`batch_transcribe.py`），但它只做串行四件事，不排队、不并发。详见 README「能力归属」表。
 
 ## 工作流骨架
 
@@ -72,6 +72,7 @@ agent_created: true
 | 结论能不能写、哪些不能外推 | `references/08-methodology.md` |
 | 某个模型是谁做的、什么许可证 | `references/09-attribution.md` |
 | 要真正跑一条转写、或查看输出 JSON 结构 | `scripts/transcribe.py` |
+| 一次跑一整个文件夹（或多目录） | `scripts/batch_transcribe.py`（先 `--dry-run` 看计划） |
 | 质检报了 ERROR / RED，想知道区别和阈值 | `references/04-quality.md`、`scripts/qc_check.py` |
 | 我的环境算不算已验证、依赖版本要求 | `README.md` §3、`references/06-environment.md` |
 | 直接抄命令 | `references/10-commands.md` |
@@ -98,7 +99,8 @@ agent_created: true
 
 - `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD；仅当错误确属 GPU/CUDA 时才回退 CPU（模型坏、音频坏直接报错，`--no-fallback` 可禁用回退）；产物可直接喂给 qc_check。读输出里的 `device` 字段判断实际用的设备，别只看命令行入参。
 - `scripts/check_env.py`：只读环境自检，输出版本、显卡、CUDA DLL 文件、磁盘、模型目录状态。
+- `scripts/batch_transcribe.py`：多目录/多模式**串行**批处理，跳过已完成、失败隔离，每文件产出与单跑同 schema 的 JSON + MD，汇总写 `_batch/summary.json`；退出码 0/1/2。**不做并发、队列、重试调度**——状态就是那些输出 JSON 本身。
 - `scripts/qc_check.py`：输入校验（ERROR）+ 四项粗筛 + 三查硬规则（RED/REVIEW）；无真实时间戳或时间戳无效时时间类指标为 `null` 并标 N/A，duration 无效时明确报「无法检查」；`--json` 始终是严格 JSON。
-- `tests/run_smoke.py`：零依赖回归测试，33 类输入 × 文本/JSON 两种模式，883 条断言；`tests/run_transcribe_unit.py`：回退决策与耗时口径单测，35 条断言。都不需要网络 / 模型 / GPU。
+- `tests/run_smoke.py`：零依赖回归测试，33 类输入 × 文本/JSON 两种模式，883 条断言；`tests/run_transcribe_unit.py`：回退决策与耗时口径，35 条断言；`tests/run_batch_unit.py`：批处理键名/碰撞/跳过判据/摘要编码，61 条断言。都不需要网络 / 模型 / GPU。
 
 > 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测配置与已验证范围见 `README.md`。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。版本规划见 `ROADMAP.md`。
