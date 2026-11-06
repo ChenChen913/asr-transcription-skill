@@ -86,6 +86,8 @@ OVERRUN_LIMIT = 0.5          # strictly greater-than
 OVERLAP_EPS = 0.001          # ignore float noise, review only
 DEFAULT_CPM = (200.0, 450.0)
 DEFAULT_SPM = (15.0, 40.0)
+REPEAT_MIN_RUN = 20          # repeated characters before it is a loop, not laughter
+REPEAT_UNITS = (2, 3, 4, 5, 6, 8, 10, 12, 16, 20)
 _MISSING = object()
 
 
@@ -252,6 +254,36 @@ def validate(d):
     return segs, errors, review, dur_ok, dur, ts_ok and not timeline_bad, problem
 
 
+def repeat_run(text, units=REPEAT_UNITS):
+    """Longest back-to-back repetition of one short unit inside a segment.
+
+    Whisper's decoder can fall into a loop and emit the same syllable for the
+    rest of a 30 s window. Measured on 悲情城市 (158 min of Taiwanese/Hokkien/
+    Japanese dialogue over loud music): 10 segments, 930 characters - 11% of
+    the transcript - were loops like "北京" x111 or "妳就吃虧了" x37.
+
+    Nothing looks wrong locally: the segment has a plausible duration and the
+    text is valid Chinese, so `punct_per_100` and the density warnings barely
+    move. Only the shape of the string gives it away.
+    """
+    best = 0
+    n = len(text)
+    for L in units:
+        i = 0
+        while i + L * 3 <= n:
+            unit = text[i:i + L]
+            k = 1
+            while k < 50 and text[i + k * L:i + (k + 1) * L] == unit:
+                k += 1
+            if k >= 3:
+                if k * L > best:
+                    best = k * L
+                i += k * L
+            else:
+                i += 1
+    return best
+
+
 def check(path, gap_limit, tail_limit):
     with open(path, "r", encoding="utf-8") as f:
         d = json.load(f)
@@ -353,6 +385,25 @@ def check(path, gap_limit, tail_limit):
         warn.append("segments %.1f/min outside %s (check split style)"
                     % (spm, DEFAULT_SPM))
 
+    # Only heard text can loop: a subtitle track is copied from text and an OCR
+    # line is read off a frame, so neither can repeat words the source never
+    # had. `source` from transcribe.py is "faster-whisper", not "asr", so the
+    # same `is_subs` split the density checks use is the one to use here.
+    loops = []
+    if not is_subs:
+        for s in segs:
+            run = repeat_run(s["t"])
+            if run >= REPEAT_MIN_RUN:
+                loops.append((s["s"], run))
+    if loops:
+        worst = max(loops, key=lambda x: x[1])
+        red.append("REPEAT LOOP %d chars at %.1fs (%d segment(s), %d chars total): "
+                   "the decoder repeated one phrase instead of transcribing - "
+                   "cut that stretch or mark it unknown; re-running it alone "
+                   "with --no-vad still loops (verified), it is not a VAD problem"
+                   % (worst[1], worst[0], len(loops),
+                      sum(r for _, r in loops)))
+
     status = "ERROR" if errors else ("REVIEW" if red else "OK")
     if no_ts:
         note = NO_TS_NOTE
@@ -369,6 +420,8 @@ def check(path, gap_limit, tail_limit):
         "errors": errors, "red": red, "warn": warn,
         "duration": round(dur, 2) if dur_ok else None,
         "chars": len(norm), "segments": len(segs),
+        "repeat_segments": len(loops),
+        "repeat_chars": sum(r for _, r in loops),
         "punct_per_100": round(len(re.findall(PUNCT, norm)) / max(len(norm), 1) * 100, 2),
         "chars_per_min": round(cpm, 1), "segs_per_min": round(spm, 1),
         "max_gap_s": round(max_gap, 2) if time_ok and not no_ts else None,
@@ -377,7 +430,8 @@ def check(path, gap_limit, tail_limit):
         "has_timestamps": ts_ok and not no_ts,
         "note": note,
         "thresholds": {"gap_gt": gap_limit, "overrun_gt": OVERRUN_LIMIT,
-                       "tail_gap_gt": tail_limit, "overlap_gt": OVERLAP_EPS},
+                       "tail_gap_gt": tail_limit, "overlap_gt": OVERLAP_EPS,
+                       "repeat_run_ge": REPEAT_MIN_RUN},
     }
 
 

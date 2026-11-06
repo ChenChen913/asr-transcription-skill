@@ -259,9 +259,27 @@ def case_md_limits():
     ok("两路起点一致" in text, "zero lag says so")
 
 
+def case_cjk_share():
+    eq(round(mg.cjk_share("我们在圣赫利尔夫人的晚宴上"), 2), 1.0,
+       "Chinese is fully CJK")
+    ok(mg.cjk_share("Are we terribly old?") < 0.05,
+       "English is almost entirely Latin")
+    ok(mg.language_mismatch("Are we terribly old? " * 20,
+                            "我们在圣赫利尔夫人的晚宴上" * 20),
+       "English audio + Chinese subtitles is a language mismatch")
+    ok(not mg.language_mismatch("我们在圣赫利尔夫人的晚宴上" * 20,
+                                "我们正在全线溃败是真的吗" * 20),
+       "two Chinese transcripts are not a mismatch")
+    ok(not mg.language_mismatch("Are we old?", "我们老了吗"),
+       "too little text to judge - do not guess the language")
+    eq(mg.cjk_share(""), 0.0, "empty text is not CJK")
+    eq(mg.cjk_share("123！！"), 0.0, "digits and punctuation are not letters")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="merge-unit-")
     try:
+        case_cjk_share()
         case_norm_and_tokens()
         case_ratio()
         case_align_by_midpoint()

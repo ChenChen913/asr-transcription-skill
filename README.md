@@ -6,11 +6,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1393%20offline%20assertions-brightgreen.svg" alt="1393 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1485%20offline%20assertions-brightgreen.svg" alt="1485 offline assertions">
   <a href="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml"><img src="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
 </p>
 
-给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1393 条离线断言。
+给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1485 条离线断言。
 
 > [!NOTE]
 > 本仓库由 AI 辅助开发，脚本与数字都经人工实测复核，过程记录在 [`ROADMAP.md`](ROADMAP.md)。未验证的平台不写成「已支持」，见[已知限制](#已知限制)。
@@ -498,7 +498,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # 串行批处理
 │   ├── qc_check.py           # 输入校验 + 四项粗筛 + 三查
 │   └── check_env.py          # 只读环境自检
-├── tests/                    # 六套零依赖测试，共 1393 条断言
+├── tests/                    # 六套零依赖测试，共 1485 条断言
 └── docs/
     ├── 转写经验_通用版.md      # 未拆分的完整原文；与 references 冲突时以 references 为准
     ├── 字幕识别与OCR_调研与设计.md  # 三条通路与实测数据；字幕轨 → v0.6，硬字幕 → v0.7
@@ -524,7 +524,7 @@ python tests/run_merge_unit.py       # 对齐、相似度分级、时间偏移�
 实跑结果（2026-11-06）：
 
 ```text
-37 cases x (text + --json), 1026 assertions, 0 failures.
+40 cases x (text + --json), 1104 assertions, 0 failures.
 43 assertions, 0 failures.
 102 assertions, 0 failures.
 79 assertions, 0 failures.
@@ -600,6 +600,10 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 - **字号太小就读不准**。640×360 这类素材上一行字只有十几像素，同一条字幕在两种留白下会读出不同结果（实测一致率 0.815）；它的产物仍然可用，但错字率明显高于竖屏 720p/1080p。
 - **听对英文专名几乎没有抵抗力**。25 条中文面试视频里 `RAG` 被听成 `RIG` / `REG` **32 次**，`DeepSeek`、`LangChain`、`Claude` **一次都没写对**；同一批素材的 OCR 分别对 6 / 6 / 4 次。英文缩写必须靠"看"或术语表回填，只交 ASR 稿一定会错。
 - **快语速中英混读会整段消失**。实测一条 **17.66 秒**的口播一个字没转出，音量正常（−18.2 dB，与前后一致）、关掉 VAD 重跑仍读不出，而画面上这段有字幕。只有 `qc_check.py` 的 LONG GAP 能自动发现它——长间隙必须回听，不是可选项。
+- **长片遇上配乐长镜头会整段复读**。158 分钟的《悲情城市》有 8 段、1066 字是同一个词刷满一个 30 秒窗口（最坏一段 222 字全是"北京"）；《至暗时刻》10 分钟片段开头 45 秒是"不"字循环。关 VAD 单独重跑只会把"不"换成"呃"，**不是 VAD 的锅**。`qc_check.py` 新增 REPEAT LOOP 检查，会报出时间戳和字数；那段时间只能标为未知，不要当成文稿。25 条短访谈里一次都没出现过，所以短素材测不出这个边界。
+- **听和看必须是同一种文字才能互校**。英文原声配中文字幕时（《至暗时刻》听的一方 4% 汉字、看的一方 96%），98 段里 0 段一致、中位相似度 0.000。`merge_sources.py` 现在直接说明"两路不是同一种文字"，并提示各自单独使用，而不是误导成"可能不是同一个文件"。
+- **双行字幕必须放宽裁剪，代价是时间**。中英双语、或一句话折成两行时，若按字幕带窄裁剪，PP-OCR 会把两行并成一个框读出乱码；改为按整块下半幅检测后才能分开，再由 `--language` 剔除译文（《纵横四海》剔 136 行、《至暗时刻》剔 342 行，错字"这黑每幅画都过于万"变回"这里每幅画都过千万"）。同一条 10 分钟片段由 27 秒变成约 4.5 分钟；单行字幕不走这条路，速度不变。
+- **纪录片画面里的字卡会混进 OCR 稿**。《人间世》10 分钟里 OCR 比听写多出 46% 的字（1340 vs 916），同语言互校中位相似度只有 0.667（短访谈约 0.90）；互校上限由"看"的质量决定。
 - **互校只对齐，不裁决**。`merge_sources.py` 给出"哪几段两边不一致"，谁对谁错要回到音频和画面判断。它不产出合并稿，也不自动改任何一边。
 - **单文件失败不落盘**。直接调 `transcribe.py` 失败时没有产物，只能靠退出码判断。批量场景已覆盖（`_batch/summary.json` 记退出码与错误尾部），单文件场景仍是 `ROADMAP.md` 的 C4。
 - **不报准确率**。没有人工标准答案就不报，这是硬规则，不是谦虚。
@@ -616,7 +620,7 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 | turbo / CPU | 约 2.6–2.9× | 约 1.4–1.5 GB | 0 | 慢 |
 | SenseVoice q8 GGUF / CPU | 约 27–28× | 约 0.36–0.37 GB | 0 | 预览 / 对照 / 漏段线索 |
 
-出处：2026-11-05 单机实测，**4 段**中文短口播（1.31 / 1.50 / 2.12 / 3.90 分钟），**9 种配置共 28 次运行**，波动约 ±30%。样本量是个位数，只能判断相对关系，**不是跨机型基准**，长音频、会议、朗读都不能外推。完整表与口径见 `references/01-selection.md` §1.7。
+出处：2026-11-05 单机实测，**4 段**中文短口播（1.31 / 1.50 / 2.12 / 3.90 分钟），**9 种配置共 28 次运行**，波动约 ±30%。样本量是个位数，只能判断相对关系，**不是跨机型基准**，会议、朗读都不能外推。2026-11-06 补测长音频：44.2 分钟纪录片 91.9 秒（28.9×）、158.5 分钟电影 172.8 秒（55.0×），均未失败、显存未随片长增长；两片都是大段配乐/静场，倍率偏高不代表语速快。完整表与口径见 `references/01-selection.md` §1.7。
 
 ## 第三方项目与许可证
 

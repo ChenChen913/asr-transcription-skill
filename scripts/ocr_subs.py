@@ -67,9 +67,11 @@ REGION = (0.50, 0.995)         # only the lower half can hold a subtitle
 BAND_PAD = 0.05
 MIN_SUPPORT = 0.25             # a band must show up in >=25% of the sampled frames
 MIN_DISTINCT = 2               # ...and its text must change: kills logos/titles
+FALLBACK_DISTINCT = 3          # unfiltered retry needs more than jitter to qualify
 MAX_LINE_H = 0.12              # a subtitle line is never 12% of the frame height
 MAX_BAND_H = 0.16              # two lines plus a little slack; taller is a paragraph
 HALF_BAND = 0.05               # half-height of the window scored around each centre
+STACK_GAP = 0.5                # two y clusters > half a line apart = stacked lines
 CALIB_FRAMES = 16
 MAX_FRAMES = 900
 CJK = ("\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
@@ -412,6 +414,10 @@ def calibrate(samples, height_of):
        merely sit near each other is single-linkage clustering: on a page of UI
        text there is always a box within the gap, so the whole lower half merged
        into one 49%-tall "band" and those files were rejected outright.
+
+    Step 1 only makes sense when there *are* two size tiers. On a film the
+    subtitle is the only text on screen, so the strict pass is retried without
+    the size cut - see the comment at that fallback.
     """
     items = []
     for idx, s in enumerate(samples):
@@ -434,9 +440,68 @@ def calibrate(samples, height_of):
         return None
 
     n = max(len(samples), 1)
+    best = _score_bands(big, n)
+    if best is not None:
+        _mark_stacked(best, items)
+        best["cut"] = "percentile"
+        return best
+
+    # Fallback for footage whose only on-screen text *is* the subtitle.
+    #
+    # The percentile cut exists for screen recordings, where body copy is much
+    # smaller than the subtitle. On a film there is one text layer and the cut
+    # turns into a coin flip on OCR jitter: measured on a 10-minute slice of
+    # 纵横四海, 30 sampled frames produced 18 boxes, all 4.1-6.2% tall, and
+    # keeping the top 40% left 8 boxes in only 4 distinct frames - support
+    # 0.13, below MIN_SUPPORT, so a film with clear bilingual subtitles was
+    # rejected as "no band".
+    #
+    # Only reachable when the cut actually discarded something and the strict
+    # pass found nothing, so every file that passes today still passes the same
+    # way. DISTINCT >= 3 is the guard: a station logo or a title card is one
+    # line that never changes, and OCR jitter can at most turn it into two.
+    if len(big) == len(items):
+        return None
+    loose = _score_bands(items, n)
+    if loose is None or loose["distinct"] < FALLBACK_DISTINCT:
+        return None
+    _mark_stacked(loose, items)
+    loose["cut"] = "none"
+    return loose
+
+
+def _mark_stacked(band, items):
+    """Does the calibrated band hold two stacked lines?
+
+    The band's own `core` only covers the line that won the scoring window, so
+    measuring its height misses a second line just below it - which is exactly
+    what a Chinese+English subtitle looks like. Count the y *clusters* in the
+    padded crop instead: jitter on one line stays inside half a line height,
+    a second line sits a whole line away.
+    """
+    near = sorted(x["cy"] for x in items
+                  if band["y0"] <= x["cy"] <= band["y1"])
+    gap = STACK_GAP * band["mean_h"]
+    clusters = 0
+    prev = None
+    for c in near:
+        if prev is None or c - prev > gap:
+            clusters += 1
+        prev = c
+    band["stacked"] = clusters > 1
+    return band
+
+
+def _score_bands(items, n):
+    """Best subtitle band among `items`, or None.
+
+    Scoring only: the caller decides which boxes get to compete. Split out so
+    the strict pass (size-filtered) and the fallback (unfiltered) can be held
+    to the same rules instead of growing two versions of the same loop.
+    """
     best, best_score = None, 0.0
-    for c in sorted({round(x["cy"], 3) for x in big}):
-        sel = [x for x in big if abs(x["cy"] - c) <= HALF_BAND]
+    for c in sorted({round(x["cy"], 3) for x in items}):
+        sel = [x for x in items if abs(x["cy"] - c) <= HALF_BAND]
         support = len({x["frame"] for x in sel}) / float(n)
         distinct = len({x["key"] for x in sel})
         sizes = sorted(x["h"] for x in sel)
@@ -603,6 +668,25 @@ def read_video(path, engine, cfg, progress=None):
         top, bot = ((cfg["region"][0], cfg["region"][1]) if band is None
                     else (band["y0"], band["y1"]))
         keep_top, keep_bot = (top, bot) if band is None else band["core"]
+        # A band spanning two stacked lines (bilingual subtitles, or one cue
+        # wrapped over two lines) needs a taller detection crop. Cropping to
+        # core +/- 5% hands PP-OCR a 640x55 px strip with both lines in it and
+        # the detector fuses them into one 16%-tall box whose recognition is
+        # garbage; measured on 纵横四海 at 147.8 s:
+        #   crop 0.805-0.967 -> 1 box  "，摘什么鬼，晚，这黑每幅画都过于万，"
+        #   crop 0.500-0.995 -> 2 boxes "搞什么鬼哎这里每幅画都过千万"
+        #                               "I don't believe it! ..."
+        # Only multi-line bands change, so single-line material keeps the crop
+        # and the speed it had before. `core` still decides what is a subtitle;
+        # the wider crop is context for the detector, not a wider net.
+        if band is not None and band.get("stacked"):
+            top, bot = cfg["region"][0], cfg["region"][1]
+            # `core` was tightened around the one line that won the scoring
+            # window. With two stacked lines that silently throws the other
+            # one away (on 纵横四海 core landed on the English line and cut
+            # the Chinese one out). Both lines are the same cue, so accept the
+            # whole padded band here and let pick_lines() choose the language.
+            keep_top, keep_bot = band["y0"], band["y1"]
         # One slot size for every frame, taken from the band's own median line
         # height. See lines_of() for what goes wrong when it is derived per frame.
         bucket = max(band["mean_h"] * 0.5, 0.004) if band else None
@@ -648,6 +732,7 @@ def read_video(path, engine, cfg, progress=None):
         segs = build_segments(readings, half, duration)
         return {"segments": segs, "duration": duration, "duration_source": "container",
                 "band": band, "band_used": [round(top, 4), round(bot, 4)],
+                "wide_crop": bool(band and band.get("stacked")),
                 "frames": len(frames), "fps": round(fps, 3), "note": note,
                 "hits": sum(1 for r in readings if r[1]), "info": info,
                 "furniture": furn, "translations": translations}
@@ -721,6 +806,7 @@ def process_one(path, engine, opts):
         "params": {"ocr": "RapidOCR / PP-OCR (onnxruntime)", "fps": got["fps"],
                    "frames": got["frames"], "sample_width": SAMPLE_W,
                    "region": list(opts["region"]), "band": got["band_used"],
+                   "wide_crop": got.get("wide_crop", False),
                    "min_score": opts["min_score"], "note": got["note"],
                    "furniture": got.get("furniture") or {},
                    "translations_dropped": got.get("translations", 0)},
@@ -767,9 +853,10 @@ def list_one(path, engine, opts):
               % (info["width"], info["height"], duration, len(frames)))
         if band:
             print("  band    : y=%.3f-%.3f | present in %.0f%% of frames | "
-                  "%d distinct lines | line height %.1f%%"
+                  "%d distinct lines | line height %.1f%%%s"
                   % (band["y0"], band["y1"], band["support"] * 100,
-                     band["distinct"], band["mean_h"] * 100))
+                     band["distinct"], band["mean_h"] * 100,
+                     " | no size cut" if band.get("cut") == "none" else ""))
             print("  verdict : burned-in subtitles")
             for t in texts[:3]:
                 print("  sample  : %s" % t[:44])

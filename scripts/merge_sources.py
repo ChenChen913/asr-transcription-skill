@@ -37,6 +37,37 @@ TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9+#._-]*|\d+(?:\.\d+)?")
 PUNCT_BODY = r"，。！？、,.!?;；:：\"'“”‘’（）()\[\]【】…—\-~～"
 
 
+CJK_CHARS = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def cjk_share(s):
+    """Fraction of characters written in a CJK script.
+
+    Only used to explain a near-zero score: on 至暗时刻 the heard side was
+    English and the seen side Chinese subtitles, so every pair "disagreed"
+    even though both were perfectly good transcripts of the same 10 minutes.
+    Comparing them is meaningless, and the old message told the user to check
+    whether they were the same file - which sent them looking for the wrong bug.
+    """
+    body = [c for c in str(s or "") if c.isalpha()]
+    if not body:
+        return 0.0
+    return sum(1 for c in body if CJK_CHARS.match(c)) / float(len(body))
+
+
+def language_mismatch(heard_text, seen_text):
+    """True when one side is Latin-dominant and the other CJK-dominant.
+
+    Both sides need 200+ letters: a short Chinese line with three English
+    terms inside it can otherwise look "Latin-dominant" by accident. Over a
+    whole transcript that averages out (至暗时刻: heard 4% CJK, seen 96%).
+    """
+    if min(len(str(heard_text or "")), len(str(seen_text or ""))) < 200:
+        return False
+    h, s = cjk_share(heard_text), cjk_share(seen_text)
+    return (h < 0.20 and s > 0.60) or (s < 0.20 and h > 0.60)
+
+
 def norm_key(s):
     """Comparison form only: no case, spaces, or punctuation."""
     s = re.sub("[%s]" % PUNCT_BODY, "", str(s or "")).lower()
@@ -344,7 +375,19 @@ def main():
     seen_chars = sum(len(p["seen"]) for p in pairs)
 
     # A report full of low scores usually means misalignment, not disagreement.
-    if len(diff_pairs) >= 8 and mean < 0.30:
+    # Rule out different languages first: that is a reason the comparison is
+    # invalid, not a reason either transcript is wrong.
+    heard_text = "".join(c["t"] for c in heard["segs"])
+    seen_text = "".join(c["t"] for c in seen["segs"])
+    heard_cjk = cjk_share(heard_text)
+    seen_cjk = cjk_share(seen_text)
+    different_scripts = language_mismatch(heard_text, seen_text)
+    if len(diff_pairs) >= 8 and mean < 0.30 and different_scripts:
+        verdict = ("⚠ 两路不是同一种文字（听的一方 CJK 占 %.0f%%，看的一方占 %.0f%%）："
+                   "例如英文原声配中文字幕。这不是错稿，是两路根本无法逐字对照；"
+                   "请各自单独使用，不要按下面的分歧去改任何一份。"
+                   % (heard_cjk * 100, seen_cjk * 100))
+    elif len(diff_pairs) >= 8 and mean < 0.30:
         verdict = ("⚠ 平均相似度只有 %.2f：两路可能不是同一段内容，或者时间轴起点不同。"
                    "先确认两边是不是同一个文件，再看下面的对照。" % mean)
     elif counts["differ"] == 0 and counts["near"] == 0:

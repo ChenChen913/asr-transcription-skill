@@ -6,11 +6,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1393%20offline%20assertions-brightgreen.svg" alt="1393 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1485%20offline%20assertions-brightgreen.svg" alt="1485 offline assertions">
   <a href="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml"><img src="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
 </p>
 
-An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1393 offline assertions.
+An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1485 offline assertions.
 
 > [!NOTE]
 > This repository is AI-assisted. Every script and number has been verified by hand, and the process is recorded in [`ROADMAP.md`](ROADMAP.md). Platforms that were not tested are never described as supported — see [Known limitations](#known-limitations).
@@ -496,7 +496,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # serial batch runner
 │   ├── qc_check.py           # validation + four coarse metrics + three checks
 │   └── check_env.py          # read-only environment check
-├── tests/                    # six zero-dependency suites, 1393 assertions
+├── tests/                    # six zero-dependency suites, 1485 assertions
 └── docs/
     ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
     ├── 字幕识别与OCR_调研与设计.md  # three routes and measurements; the track part shipped as v0.6
@@ -522,7 +522,7 @@ python tests/run_merge_unit.py       # alignment, similarity tiers, time offset,
 Actual output (2026-11-06):
 
 ```text
-37 cases x (text + --json), 1026 assertions, 0 failures.
+40 cases x (text + --json), 1104 assertions, 0 failures.
 43 assertions, 0 failures.
 102 assertions, 0 failures.
 79 assertions, 0 failures.
@@ -598,6 +598,10 @@ A: Yes, through `batch_transcribe.py`: non-WAV matches are decoded to 16 kHz mon
 - **Small text is read less reliably.** At 640×360 a line is a dozen pixels tall and the same cue reads differently under two crop paddings (measured agreement 0.815). The output is still usable, but the error rate is clearly higher than on a 720p/1080p vertical clip.
 - **Hearing has almost no defence against English proper nouns.** Across 25 Chinese interview clips, `RAG` came out as `RIG` / `REG` **32 times**, and `DeepSeek`, `LangChain`, `Claude` were **never once spelled right**; OCR on the same clips got them 6 / 6 / 4 times. English abbreviations have to be corrected from the picture or a term list — an ASR-only draft will get them wrong.
 - **Fast mixed Chinese/English speech can vanish wholesale.** One measured **17.66 s** stretch produced no text at all, with normal loudness (−18.2 dB, same as the surrounding minutes) and with VAD disabled, while the picture carried subtitles for exactly that span. Only the LONG GAP check in `qc_check.py` catches it, so long gaps must be re-listened — that is not optional.
+- **Long films with long music-only shots make the decoder loop.** In a 158-minute film, 8 segments / 1066 characters were one phrase filling an entire 30 s window (the worst was 222 characters of "北京"); a 10-minute slice of an English film opened with 45 s of "不". Re-running that span alone with `--no-vad` merely swaps "不" for "呃" — VAD is not the cause. `qc_check.py` now reports a REPEAT LOOP with timestamp and size; mark those stretches unknown instead of trusting them. None of the 25 short interview clips showed it, so short material cannot expose this edge.
+- **Cross-checking requires the same script on both sides.** With English audio and Chinese subtitles (heard 4% CJK, seen 96%), 0 of 98 pairs agreed and median similarity was 0.000. `merge_sources.py` now says plainly that the two sides use different writing systems and should each be used on their own, instead of suggesting they might be different files.
+- **Two stacked lines need a wider crop, and that costs time.** Cropping tightly to the band makes PP-OCR fuse a Chinese line and its English translation into one box and read garbage; detecting over the whole lower half separates them, after which `--language` drops the translation (136 lines in one film, 342 in the other, and "这黑每幅画都过于万" becomes "这里每幅画都过千万"). The same 10-minute clip goes from 27 s to about 4.5 minutes. Single-line subtitles keep the fast path unchanged.
+- **On-screen cards leak into documentary OCR.** Over 10 minutes of a documentary, OCR produced 46% more characters than ASR (1340 vs 916) and same-language cross-checking fell to a median 0.667 (about 0.90 on short interviews). The ceiling of cross-checking is set by the quality of "seeing".
 - **Single-file failures leave no artefact.** Calling `transcribe.py` directly on a failing input produces nothing; only the exit code tells you. Batch covers it (`_batch/summary.json` records exit code and error tail); the single-file case is still C4 in `ROADMAP.md`.
 - **No accuracy claims.** Without a human reference there is no number. That is a rule, not modesty.
 - **SenseVoice is a second opinion only.** Its output has no usable timestamps, and it is clearly weaker on mixed Chinese/English proper nouns. It cannot produce a final transcript alone.
@@ -613,7 +617,7 @@ A: Yes, through `batch_transcribe.py`: non-WAV matches are decoded to 16 kHz mon
 | turbo / CPU | about 2.6–2.9x | about 1.4–1.5 GB | 0 | Slow |
 | SenseVoice q8 GGUF / CPU | about 27–28x | about 0.36–0.37 GB | 0 | Preview / comparison / missing-segment hints |
 
-Source: one machine, 2026-11-05, **4 clips** of Chinese speech (1.31 / 1.50 / 2.12 / 3.90 minutes), **9 configurations, 28 runs**, roughly ±30% variance. The sample is in the single digits, so these numbers indicate relative order only. **They are not a cross-machine benchmark** and do not extrapolate to long recordings, meetings, or read-aloud material. Full table and definitions in `references/01-selection.md` section 1.7.
+Source: one machine, 2026-11-05, **4 clips** of Chinese speech (1.31 / 1.50 / 2.12 / 3.90 minutes), **9 configurations, 28 runs**, roughly ±30% variance. The sample is in the single digits, so these numbers indicate relative order only. **They are not a cross-machine benchmark** and do not extrapolate to meetings or read-aloud material. Long audio was measured separately on 2026-11-06: a 44.2-minute documentary took 91.9 s (28.9×) and a 158.5-minute film 172.8 s (55.0×), neither failed and VRAM did not grow with duration; both contain long music/silence stretches, so the higher ratio is not a speech-speed claim. Full table and definitions in `references/01-selection.md` section 1.7.
 
 ## Third-party projects and licenses
 

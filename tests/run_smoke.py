@@ -192,6 +192,19 @@ CASES = [
      {"duration": 60, "timestamps": True, "engine": "ocr",
       "segments": [seg(i * 9.0, i * 9.0 + 7.0, "短句。") for i in range(6)]},
      0, "OK", [], ["char density", "check split style"]),
+
+    # ---- v1.1: decoder repetition loops on long, music-heavy audio ----
+    ("repeat_loop", "Whisper stuck on one phrase for a whole 30 s window",
+     doc(300.0, [seg(0, 30, "北京" * 60), seg(35, 299.5, "后段是正常的内容。")], True),
+     1, "REVIEW", ["REPEAT LOOP", "at 0.0s"], []),
+    ("repeat_loop_laughter", "genuine laughter is not a decoder loop",
+     doc(60.0, [seg(0, 10, "哈哈哈哈，这个真的太好笑了。"),
+                seg(10, 59.5, "我们接着聊正事吧。")], True),
+     0, "OK", [], ["REPEAT LOOP"]),
+    ("repeat_loop_ocr_exempt", "a subtitle refrain must not be called a loop",
+     {"duration": 60, "timestamps": True, "engine": "ocr",
+      "segments": [seg(0, 30, "前进前进前进" * 5), seg(30, 59.5, "后面一句。")]},
+     0, "OK", [], ["REPEAT LOOP"]),
 ]
 
 

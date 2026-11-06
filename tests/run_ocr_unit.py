@@ -230,6 +230,12 @@ def case_band_two_lines():
     if band:
         ok(band["y1"] - band["y0"] > 0.08, "band spans both lines")
         eq(band["distinct"], 20, "both lines counted as distinct text")
+        eq(band["stacked"], True,
+           "two stacked lines are marked for the wider detection crop")
+    single = ocr.calibrate(
+        [frame([("第%d句话" % i, 0.75)]) for i in range(10)], [1000] * 10)
+    eq(single["stacked"], False,
+       "a single-line band keeps the narrow crop and its old speed")
 
 
 def case_band_no_chaining():
@@ -255,6 +261,38 @@ def case_band_line_too_tall():
     samples = [frame([("大字第%d行" % i, 0.75)], h=0.15) for i in range(10)]
     eq(ocr.calibrate(samples, [1000] * 10), None,
        "a line taller than 12%% of the frame is not a subtitle")
+
+
+def case_band_single_text_layer():
+    """A film: the subtitle is the only text on screen, so there is no "bigger"
+    tier to keep.
+
+    Measured on a 10-minute slice of 纵横四海: 30 sampled frames gave 18 boxes,
+    all 4.1-6.2% tall, and keeping the top 40% left 8 boxes in 4 frames -
+    support 0.13, so a film with clear bilingual subtitles was refused. Here
+    the same shape: half the frames read tall, half read short, purely because
+    of glyph ascenders and OCR jitter.
+    """
+    samples = []
+    for i in range(30):
+        if i >= 8:
+            samples.append({"boxes": []})
+        elif i % 2:
+            samples.append({"boxes": [box("上句%d" % i, 0.885, h=0.060),
+                                      box("下句%d" % i, 0.925, h=0.062)]})
+        else:
+            samples.append({"boxes": [box("上句%d" % i, 0.885, h=0.041),
+                                      box("下句%d" % i, 0.925, h=0.045)]})
+    band = ocr.calibrate(samples, [1000] * 30)
+    ok(band is not None, "a single text layer is still a band")
+    if band:
+        eq(band["cut"], "none", "it was found by the unfiltered retry")
+        close(band["support"], 8 / 30.0, 0.002, "support counts every frame with text")
+        ok(band["distinct"] >= 3, "the retry still demands changing text")
+    # A logo that never changes must not slip in through the same door.
+    logo = [frame([("看看新闻", 0.94)], h=0.030) for _ in range(30)]
+    eq(ocr.calibrate(logo, [1000] * 30), None,
+       "the retry does not turn a static logo into a band")
 
 
 def case_band_resolution_independent():
@@ -341,6 +379,7 @@ def main():
     case_band_two_lines()
     case_band_no_chaining()
     case_band_line_too_tall()
+    case_band_single_text_layer()
     case_band_resolution_independent()
     case_segments_merge()
     case_segments_confidence_wins()
