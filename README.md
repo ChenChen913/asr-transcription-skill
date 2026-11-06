@@ -7,6 +7,7 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
   <img src="https://img.shields.io/badge/tests-1393%20offline%20assertions-brightgreen.svg" alt="1393 offline assertions">
+  <a href="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml"><img src="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
 </p>
 
 给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1393 条离线断言。

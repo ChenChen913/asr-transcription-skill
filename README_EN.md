@@ -7,6 +7,7 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
   <img src="https://img.shields.io/badge/tests-1393%20offline%20assertions-brightgreen.svg" alt="1393 offline assertions">
+  <a href="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml"><img src="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
 </p>
 
 An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1393 offline assertions.
