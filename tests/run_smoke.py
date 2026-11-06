@@ -172,9 +172,17 @@ CASES = [
 
 
 def run(path, json_mode=False):
-    cmd = [PY, QC, path] + (["--json"] if json_mode else [])
+    # The child MUST emit UTF-8 regardless of the console code page. On a
+    # zh-CN Windows the default is cp936/GBK: the Chinese diagnostics arrive
+    # as GBK bytes, errors="replace" turns them into U+FFFD and every
+    # assertion that looks for a Chinese keyword fails (seen on a plain
+    # PowerShell: 2 failures). "-X utf8" is not inherited from this process,
+    # so it is passed explicitly; PYTHONUTF8 covers older interpreters and
+    # any nested subprocess.
+    cmd = [PY, "-X", "utf8", QC, path] + (["--json"] if json_mode else [])
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                       errors="replace")
+                       errors="replace", env=env)
     return r.returncode, r.stdout + r.stderr
 
 
@@ -193,6 +201,35 @@ TS_INVALID_CASES = ("start_nan", "mid_start_nan", "end_inf",
 # has_timestamps = true. Now every time metric must be null while the
 # text-derived metrics stay usable.
 TIMELINE_INVALID_CASES = ("negative_start", "end_before_start", "out_of_order")
+
+
+def check_json_encoding(assert_that):
+    """--json must be UTF-8 even when the child runs on a legacy code page.
+
+    A zh-CN Windows defaults stdout to cp936/GBK when redirected; GBK bytes are
+    not valid JSON for json.load / jq / JS / Go. Regression for the case where
+    `qc_check.py --json > report.json` produced GBK.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONUTF8", "PYTHONIOENCODING")}
+    env["PYTHONUTF8"] = "0"              # force the legacy code page
+    with tempfile.TemporaryDirectory(prefix="qc_enc_") as tmp:
+        path = os.path.join(tmp, "neg.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"duration": 30, "segments": [{"s": -3, "e": 5, "t": "你好"}]},
+                      f, ensure_ascii=False)
+        r = subprocess.run([PY, QC, path, "--json"], capture_output=True, env=env)
+    try:
+        text = r.stdout.decode("utf-8")
+    except UnicodeDecodeError as e:
+        assert_that(False, "json_encoding: --json is not UTF-8 (%s)" % e.reason)
+        return
+    assert_that(True, "json_encoding: decodes as UTF-8")
+    try:
+        json.loads(text)
+        assert_that(True, "json_encoding: parses as JSON")
+    except ValueError as e:
+        assert_that(False, "json_encoding: invalid JSON (%s)" % e)
 
 
 def main():
@@ -283,6 +320,8 @@ def main():
             print("%-30s rc=%d status=%-6s | %s" % (name, exp_rc, exp_status, risk))
 
     print()
+    check_json_encoding(assert_that)
+
     print("%d cases x (text + --json), %d assertions, %d failures."
           % (len(CASES), checks[0], len(failures)))
     if failures:

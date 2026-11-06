@@ -2,7 +2,7 @@
 
 一个可随时调用的 WorkBuddy Skill：把「选方案 → 装环境 → 抽音频 → 转写 → 交叉核对 → 质检 → 精编」的完整经验，做成主文件精简、细节按需加载的技能包。
 
-- 版本：v0.4.2（2026-11-06）｜仓库已公开｜许可证 **MIT**（见 `LICENSE`）；授权范围与第三方归属见 `NOTICE.md`
+- 版本：v0.4.3（2026-11-06）｜仓库已公开｜许可证 **MIT**（见 `LICENSE`）；授权范围与第三方归属见 `NOTICE.md`
 - 内容来源：本机多轮实测沉淀的《转写经验_通用版》（完整原文见 `docs/转写经验_通用版.md`）
 - 适用：本地 / 离线、Windows、中文为主且含英文术语的视频转写
 - 版本规划与已修问题见 `ROADMAP.md`
@@ -32,7 +32,7 @@ python scripts/transcribe.py --wav "<编号>.wav" --model "<模型目录>" \
 
 # 6. 质检 + 自检测试
 python scripts/qc_check.py "out/A1_<编号>.json"
-python tests/run_smoke.py          # 质检契约：33 类输入 / 881 条断言
+python tests/run_smoke.py          # 质检契约：33 类输入 / 883 条断言
 python tests/run_transcribe_unit.py  # 回退决策与耗时口径：35 条断言
 ```
 
@@ -138,7 +138,7 @@ python tests/run_transcribe_unit.py  # 回退决策与耗时口径：35 条断�
 - **触发（已收窄）**：只有报错信息看起来**确实是 GPU / CUDA 问题**才回退——命中 `cuda / cublas / cudnn / cudart / nvml / gpu / out of memory / no kernel image`。典型：驱动版本不够、找不到 cuBLAS/cuDNN、显存不足。
 - **不回退**：模型文件损坏或版本不符、音视频解不出、参数不合法、其他程序错误。这些换 CPU 一样失败，回退只会把真正的错误埋掉、白等一遍。
 - **两个错误都保留**：回退后 CPU 也失败时，GPU 与 CPU 两侧的错误一起打印；GPU 原始异常同时写进输出的 `fallback` 字段。
-- **性能影响**：从约 19× 实时降到约 2.6–2.9×，一条 3 分钟音频约需 1 分钟以上。
+- **性能影响**：从约 19× 实时降到约 2.6–2.9×，一条 3 分钟音频约需 1 分钟以上。倍率出处：4 段样本（1.31–3.90 分钟）/ 9 配置共 28 次运行 / 2026-11-05 单机实测，见 `references/01-selection.md` §1.7。
 - **怎么判断实际用了哪个**：读输出 JSON 的 `device`（`cuda` / `cpu`）、`fallback`（非空即回退过，含原始异常）、`fallback_load_s`（失败那次尝试已完成的模型加载耗时，未完成则为 `null`）。**不要只看命令行 `--device` 入参**。
 - **耗时口径**：`load_s` / `asr_s` 只描述**最终成功的设备**；`asr_s` 是纯推理，**不含模型加载**；`rtf_x = duration / asr_s`。
 - 显式只要 CPU：`--device cpu --compute int8`；排查显卡问题时禁用回退：`--no-fallback`。
@@ -173,7 +173,7 @@ asr-transcription/
 │   └── qc_check.py           # 输入校验(ERROR) + 四项粗筛 + 三查(RED/REVIEW)
 │                             #   时间轴无效(负值/倒序/乱序) → 时间指标置 null
 ├── tests/
-│   ├── run_smoke.py          # 零依赖回归：质检契约 33 类输入 / 881 条断言
+│   ├── run_smoke.py          # 零依赖回归：质检契约 33 类输入 / 883 条断言
 │   └── run_transcribe_unit.py # 零依赖单测：回退决策 / 耗时口径 / DLL 句柄
 └── docs/
     └── 转写经验_通用版.md     # 完整原文归档；运行时以 references 为准

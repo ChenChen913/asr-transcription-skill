@@ -403,6 +403,17 @@ def main():
     n_err = sum(1 for r in rows if r.get("errors"))
     n_red = sum(1 for r in rows if r.get("red"))
     if a.json:
+        # JSON is a byte format: RFC 8259 requires UTF-8 (or UTF-16/32), and
+        # every consumer (json.load / jq / JS / Go) assumes it. On a zh-CN
+        # Windows the pipe/file default is cp936, so a redirected --json used
+        # to be GBK: json.load(encoding="utf-8") failed and jq rejected it.
+        # Only touch non-TTY streams; a human-facing console keeps its own
+        # code page so the Chinese diagnostics still render.
+        try:
+            if not sys.stdout.isatty():
+                sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
         print(json.dumps(sanitize(rows), ensure_ascii=False, indent=2,
                          allow_nan=False))
         sys.exit(1 if n_bad else 0)

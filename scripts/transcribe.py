@@ -119,7 +119,9 @@ def transcribe(model, wav, a, prompt):
         condition_on_previous_text=False,
         initial_prompt=prompt,
         temperature=[0.0, 0.2, 0.4],
-        word_timestamps=a.word_timestamps,
+        # word_timestamps stays False (faster-whisper default): this script has
+        # no `words` field in its output, so enabling it would only cost time
+        # (and nudge segment boundaries) while giving the caller nothing.
     )
     if a.hallucination_silence_threshold is not None:
         kwargs["hallucination_silence_threshold"] = a.hallucination_silence_threshold
@@ -162,7 +164,6 @@ def main():
     ap.add_argument("--no-vad", action="store_true")
     ap.add_argument("--no-prompt", action="store_true", help="ablation only; not for production")
     ap.add_argument("--hallucination-silence-threshold", type=float, default=None)
-    ap.add_argument("--word-timestamps", action="store_true")
     ap.add_argument("--cpu-threads", type=int, default=8)
     ap.add_argument("--no-fallback", action="store_true",
                     help="never retry on CPU; report the CUDA error as-is")
@@ -236,7 +237,7 @@ def main():
                    "condition_on_previous_text": False,
                    "initial_prompt": prompt,
                    "temperature": [0.0, 0.2, 0.4],
-                   "word_timestamps": a.word_timestamps,
+                   "word_timestamps": False,
                    "hallucination_silence_threshold": a.hallucination_silence_threshold,
                    "no_fallback": a.no_fallback},
         "timestamps": True, "segments": items, "text": text, "chars": len(text),

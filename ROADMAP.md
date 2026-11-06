@@ -16,6 +16,7 @@
 | **v0.4** | **2026-11-06** | 依据第三轮审核做运行时健壮性：非有限数值校验、DLL 句柄存活、无效时间戳不参与统计、严格 JSON 输出、回退收窄、耗时口径。测试扩到 33 类 / 863 条断言，另加 35 条断言的回退单测。 |
 | v0.4.1 | 2026-11-06 | 许可证打包修正：`LICENSE` 去掉正文后的附加段落（GitHub 因此识别为 `NOASSERTION`），恢复为纯 MIT 正文；授权范围、第三方归属与「不含模型权重/音频」声明移入新建的 `NOTICE.md`。无代码改动。 |
 | **v0.4.2** | **2026-11-06** | 依据第四轮审核区分「能解析」与「时间轴有效」：负起点 / `end < start` / 乱序一律使三个时间指标置 `null`、`has_timestamps=false`，`note` 新增 `INVALID TIMELINE`。测试 33 类 / 881 断言（+18）。 |
+| **v0.4.3** | **2026-11-06** | 依据第五轮审核修 Windows 可移植性：测试 harness 强制子进程 UTF-8（普通 zh-CN 控制台原本 2 failures）；`--json` 重定向到文件时强制 UTF-8（原本是 GBK，非合法 JSON）；ROADMAP 自检命令改用 `compileall`；移除只影响解码、不产出 `words` 的 `--word-timestamps`；性能表补样本量与时长。测试 33 类 / 883 断言。 |
 
 ### v0.3 阶段 A（P0，已全部完成）
 
@@ -60,6 +61,17 @@
 | B5 回退收窄 | 只对命中 `cuda / cublas / cudnn / cudart / nvml / gpu / out of memory / no kernel image` 的错误回退；模型、音频、参数类错误直接报原始错误。新增 `--no-fallback`；GPU 与 CPU 两侧错误同时保留；退出码 `2` 输入/模型不可用、`3` 当前设备失败、`4` 两侧都失败。 |
 | B6 耗时口径 | 建模型与推理分开计时；`load_s` / `asr_s` 只描述最终成功的设备，`asr_s` 为纯推理，`rtf_x = duration / asr_s`；新增 `fallback_load_s` 记录失败那次已完成加载的耗时。修复前回退时 `asr_s` 混入 CPU 模型加载、加载失败时 `load_s` 为 `null`。 |
 | B7 回归 | 131 份历史输出仍为 **0 ERROR / 39 REVIEW**（分布不变），28 份批次仍 **0 ERROR / 13 REVIEW**；`run_smoke.py` 33 类 / 863 断言、`run_transcribe_unit.py` 35 断言全绿。真机三连：GPU 正常出 `cuda`；强制 CUDA 失败回退 `cpu` 且 `rtf_x` 与纯 CPU 基线一致；损坏 `model.bin` 不回退、退出码 3。 |
+
+### v0.4.3 Windows 可移植性（第五轮审核，已完成）
+
+| 项 | 结果 |
+|---|---|
+| W1 测试 harness 编码 | 复现：清空 `PYTHONUTF8` / `PYTHONIOENCODING` 后 `python tests/run_smoke.py` → **2 failures**（`no_duration` 找不到中文诊断）。原因：子进程 stdout 是 cp936，harness 按 UTF-8 解码 + `errors="replace"`，中文变 U+FFFD。修复：子进程显式 `-X utf8` + `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`（`-X utf8` 不会被继承，必须显式传）。三环境复验：默认 / 清空变量 / `PYTHONUTF8=0` 均 **883 断言 0 失败**。 |
+| W1b 教训 | 之前多次报「全绿」是在 `PYTHONUTF8=1` 的注入环境下跑的，属于**假绿**。自检清单已加一条：必须在清空这两个变量的情况下再跑一遍。 |
+| W2 `--json` 编码（审核未提，同族问题） | 复现：legacy 编码下 `qc_check.py --json > report.json` 写出的是 **GBK 字节**，`json.load(encoding="utf-8")` 失败、jq 拒绝——`--json` 声称「严格 JSON」，编码却不合法。修复：非 TTY 输出时 `sys.stdout.reconfigure(encoding="utf-8")`；控制台（TTY）保持本机代码页，中文诊断照常显示。新增 2 条断言（可解码 + 可 `json.loads`）。 |
+| W3 自检命令 | `python -m py_compile scripts/*.py tests/*.py` 依赖 shell 展开通配，Windows shell 下报 `[Errno 22] Invalid argument`。改为 `python -m compileall -q scripts tests`。 |
+| W4 `--word-timestamps` | 该开关只传给 `model.transcribe`，输出从不写 `words`——打开只更慢、还会细微改动段边界，等于空开关。**移除**，`params.word_timestamps` 固定为 `false`；`references/01`、`references/03`、`SKILL.md` 同步说明「本脚本不产出词级，词级属 C3 未排期」。真机复验：`device=cuda`、`rtf=9.13`、输出无 `words` 键。 |
+| W5 性能数据出处 | `references/01` §1.7 原本只写「1–4 分钟量级、多轮实测」。补为：**4 段**（1.31 / 1.50 / 2.12 / 3.90 分钟）、**9 配置 28 次运行**、2026-11-05、单机，并明确「样本量个位数、±30% 波动、只能看相对关系」。README 同处加一行指引。 |
 
 ### v0.4.2 时间轴有效性（第四轮审核，已完成）
 
@@ -139,8 +151,10 @@
 每次改动后按顺序跑：
 
 ```bash
-python -m py_compile scripts/*.py tests/*.py
+python -m compileall -q scripts tests   # 跨 shell 可用；py_compile 的 *.py 通配在 Windows shell 下不展开
 python tests/run_smoke.py
+# Windows 必做：清空 UTF-8 变量再跑一遍，避免「假绿」
+env -u PYTHONUTF8 -u PYTHONIOENCODING python tests/run_smoke.py
 python scripts/qc_check.py "out/<配置>_<编号>.json" --json
 python scripts/check_env.py --json
 ```

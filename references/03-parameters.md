@@ -15,7 +15,7 @@
 | `condition_on_previous_text` | `False` | 防止前一段的错误在后续段落循环放大 |
 | `initial_prompt` | `以下是普通话的句子，请使用简体中文，并加上标点符号。` | **必须保留**，关掉后标点密度掉到接近 0（0–0.1/百字） |
 | `temperature` | `0.0 / 0.2 / 0.4` | 是**段内**按重复率 / 置信度阈值逐级降级，不是整次转写失败后重跑 |
-| `word_timestamps` | `False`（默认） | 只给段级起止时间；设 `True` 才输出词级，速度更慢、占用更高，非必要不开 |
+| `word_timestamps` | `False`（固定） | 只给段级起止时间。**`transcribe.py` 不产出 `words` 字段，因此没有开放这个开关**——打开只会更慢，还细微改动段边界，却拿不到词级数据。自己写代码调 faster-whisper 时才可以设 `True`，那时输出 `segment.words[]` |
 | `device` / `compute_type` | `cuda` / `float16` | 有卡就一定用 GPU |
 | 回退 | `cpu` / `int8` / `cpu_threads=8` | 只在**确属 GPU 错误**时回退，见下 |
 
