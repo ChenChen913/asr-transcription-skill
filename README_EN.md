@@ -321,7 +321,8 @@ asr-transcription/
 │   └── check_env.py          # read-only environment check
 ├── tests/                    # three zero-dependency suites, 1028 assertions
 └── docs/
-    └── 转写经验_通用版.md     # the original long-form notes; references win on conflict
+    ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
+    └── 字幕识别与OCR_调研与设计.md  # unimplemented design: three routes, measurements, red-line conflicts
 ```
 
 Three loading levels: `name` + `description` always resident → `SKILL.md` on trigger → one `references/` file on demand. Scripts execute directly; they never need to enter the context window.
@@ -409,6 +410,7 @@ A: Not directly. Run `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le out.wa
 ### Capability boundaries
 
 - **Segment-level timestamps only.** No word-level `words`, no speaker diarisation, no direct SRT / VTT export.
+- **No subtitle extraction.** Neither subtitle tracks nor on-screen text are read; video is transcribed from its audio track only. The feasibility study, measurements and implementation plan live in [`docs/字幕识别与OCR_调研与设计.md`](docs/字幕识别与OCR_调研与设计.md) — **not implemented**.
 - **Single-file failures leave no artefact.** Calling `transcribe.py` directly on a failing input produces nothing; only the exit code tells you. Batch covers it (`_batch/summary.json` records exit code and error tail); the single-file case is still C4 in `ROADMAP.md`.
 - **No accuracy claims.** Without a human reference there is no number. That is a rule, not modesty.
 - **SenseVoice is a second opinion only.** Its output has no usable timestamps, and it is clearly weaker on mixed Chinese/English proper nouns. It cannot produce a final transcript alone.
