@@ -95,6 +95,15 @@ A real pair from one clip (`懂王AI面试合集` #66, 183 s):
 - heard: `TOPK出牌, RUNK金牌, 大模型` / seen: `Top K粗排, Rerank精排, 大模型` — seeing wins this one
 - heard: `蒙逼了` / seen: `憎逼了` — hearing wins this one
 
+A full run over 25 real interview clips (2026-11-06, 48.7 minutes, none with a subtitle track):
+
+- **Hearing produced a transcript for all 25, zero failures**; seeing managed 24, and the odd one out genuinely has no text on screen — refusing was correct.
+- **English proper nouns are where hearing breaks**: `RAG` came out as `RIG` / `REG` **32 times**, versus 0 for seeing; `DeepSeek`, `LangChain` and `Claude` were **never once spelled right** by hearing, while seeing got them 6 / 6 / 4 times.
+- **Chinese look-alike characters are where seeing breaks**: OCR turned `Agent` into `a整` / `急诊` **15 times**, against 2 for hearing.
+- Median cross-check similarity falls from **0.90** (talking head with synced subtitles) to **0.64** (busy animated captions). The dirtier the picture, the more false disagreements.
+
+The resulting default: **hearing writes the draft, seeing only corrects proper nouns and numbers**; where seeing has no coverage, an English term list is the only backstop.
+
 So the answer is not to pick a side, and not to blend both into one file. It is three steps:
 
 1. **Hear first**: produce a timestamped transcript. It covers the whole clip and has sentence structure; it is the closest thing to a script.
