@@ -6,26 +6,30 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1222%20offline%20assertions-brightgreen.svg" alt="1222 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1359%20offline%20assertions-brightgreen.svg" alt="1359 offline assertions">
 </p>
 
-给 Agent 加载的中文音视频转写技能包：选型、参数、质检脚本与第三方归属，附 1222 条离线断言。
+给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1359 条离线断言。
 
 > [!NOTE]
 > 本仓库由 AI 辅助开发，脚本与数字都经人工实测复核，过程记录在 [`ROADMAP.md`](ROADMAP.md)。未验证的平台不写成「已支持」，见[已知限制](#已知限制)。
 
 ```mermaid
 flowchart LR
-    A["素材 mp4 / mkv"] -->|"先探字幕轨"| S["extract_subs.py<br/>外挂 srt / 内嵌文本轨"]
-    A -->|FFmpeg| B["16 kHz 单声道 WAV"]
-    S -->|抽到| D["out/01.json + out/01.md"]
+    A["素材 mp4 / mkv"] -->|"听：FFmpeg"| B["16 kHz 单声道 WAV"]
+    A -->|"看：有没有字幕轨"| S["extract_subs.py<br/>外挂 srt / 内嵌文本轨"]
+    A -->|"看：只有画面"| O["ocr_subs.py<br/>PP-OCR 逐帧读"]
     B --> C["transcribe.py<br/>faster-whisper turbo · GPU"]
     C -->|"错误确属 CUDA"| C2["回退 CPU int8"]
-    C --> D
-    C2 --> D
-    D --> E["qc_check.py<br/>ERROR / REVIEW"]
-    E --> F["人工三查<br/>开头 30 s · 结尾 30 s · 长间隙"]
-    F --> G["精编与留痕"]
+    C --> W["听：JSON + MD"]
+    C2 --> W
+    S --> W2["看：JSON + MD"]
+    O --> W3["看：JSON + MD"]
+    W --> M["merge_sources.py<br/>听看互校"]
+    W2 --> M
+    W3 --> M
+    M --> R["只列不一致的段落"]
+    R --> E["qc_check.py + 人工三查"]
     B -.->|可选| H["SenseVoice q8 GGUF<br/>异源第二意见"]
 ```
 
@@ -42,6 +46,7 @@ python scripts/qc_check.py "out/01.json"
 ## 目录
 
 - [为什么做这个项目](#为什么做这个项目)
+- [两种能力：听，和看](#两种能力听和看)
 - [快速开始](#快速开始)
 - [用法](#用法)
 - [配置](#配置)
@@ -75,6 +80,29 @@ python scripts/qc_check.py "out/01.json"
 
 它不是什么：不训练模型、不发布权重、不做云端服务、不含任何音频素材。仓库里只有流程、脚本和归属登记。
 
+## 两种能力：听，和看
+
+两条取字通路，错的地方不一样：
+
+| | 听（`transcribe.py`） | 看（`extract_subs.py` / `ocr_subs.py`） |
+|---|---|---|
+| 输入 | 音轨 | 字幕轨、或画面像素 |
+| 强项 | 覆盖全片、有断句、标点自然 | 专名、术语、数字通常更准；标点是作者写的 |
+| 典型错误 | 同音字：`RAG`→`RAW`、`Rerank 精排`→`RUNK 金牌` | 形近字、漏字：`懵逼`→`憎逼`；把标题、水印当成字幕 |
+
+同一个视频里的真实对照（`懂王AI面试合集` 第 66 条，183 秒）：
+
+- 听：`TOPK出牌, RUNK金牌, 大模型` ／ 看：`Top K粗排, Rerank精排, 大模型` —— 这一句看对了
+- 听：`蒙逼了` ／ 看：`憎逼了` —— 这一句听对了
+
+所以不该二选一，也不该把两份揉成一份。正确用法是三步：
+
+1. **听为主**：先出带时间戳的逐字稿。它覆盖全片、有断句，是最接近"稿子"的东西。
+2. **看为辅**：有字幕轨就抽，没有就 OCR。它是独立的一份证据，不是听写的补丁。
+3. **互校为终**：`merge_sources.py` 逐段对齐，只列出两边说法不一致、以及只有一边有内容的地方。人只看这几段，不用通读两份稿子。
+
+互校还会顺手回答两个问题：字幕整体比语音晚了几秒（剪辑过的短视频很常见），以及哪些数字、术语两边写法不同。
+
 ## 快速开始
 
 ### 前置要求
@@ -88,7 +116,7 @@ python scripts/qc_check.py "out/01.json"
 | 模型 | 一个 CTranslate2 目录，含 5 个文件：`config.json` / `model.bin` / `preprocessor_config.json` / `tokenizer.json` / `vocabulary.json` |
 | 磁盘 | turbo 约 1.51 GiB、large-v3 约 2.88 GiB |
 
-模型权重**不在本仓库**，需要自己下载（Hugging Face 或镜像）。没有模型时，`check_env.py` 与四套测试仍可运行。
+模型权重**不在本仓库**，需要自己下载（Hugging Face 或镜像）。没有模型时，`check_env.py` 与六套测试仍可运行。
 
 ### 安装
 
@@ -122,7 +150,7 @@ python scripts/qc_check.py "out/01.json"
 
 ### 不想用 Skill 机制
 
-五个脚本是普通 Python 3 程序。把仓库放在任意目录，直接 `python scripts/transcribe.py ...` 就能用，不需要 Agent 运行时。
+脚本都是普通 Python 3 程序，把仓库放在任意目录，直接 `python scripts/transcribe.py ...` 就能用，不需要 Agent 运行时。依赖只有两处：`transcribe.py` 要 faster-whisper / CTranslate2 + 模型，`ocr_subs.py` 要 `rapidocr_onnxruntime` 与 `onnxruntime`；其余五个脚本只用标准库。没装时会明确告诉你装什么，不会静默降级。
 
 想在其他 Agent 工具里按 Skill 加载，按各自文档规定的目录与元数据放置。**本仓库只实测过 WorkBuddy 用户级 Skill，不声称对其他工具已兼容。**
 
@@ -133,11 +161,13 @@ python scripts/qc_check.py "out/01.json"
 | 环节 | 归属 | 载体 |
 |---|---|---|
 | 环境自检 | 已自动化 | `scripts/check_env.py` |
-| 字幕轨抽取 | 已自动化 | `scripts/extract_subs.py` |
-| 单条转写 | 已自动化 | `scripts/transcribe.py` |
+| 字幕轨抽取（看） | 已自动化 | `scripts/extract_subs.py` |
+| 画面硬字幕 OCR（看） | 已自动化，需 OCR 运行时 | `scripts/ocr_subs.py` |
+| 单条转写（听） | 已自动化 | `scripts/transcribe.py` |
 | 批量转写 | 已自动化 | `scripts/batch_transcribe.py` |
 | 结果质检 | 已自动化 | `scripts/qc_check.py` |
-| 回归测试 | 已自动化 | `tests/` 下四套 |
+| 听看互校 | 已自动化 | `scripts/merge_sources.py` |
+| 回归测试 | 已自动化 | `tests/` 下六套 |
 | 抽音频、异源对照、差异对齐、精编、留痕 | Agent 工作流 | Skill 指导 Agent 调命令、判读结果；没有对应脚本 |
 | 首末段回听、建术语表、提供标准答案、商用许可核对 | 手动 | 需要人工判断 |
 
@@ -156,6 +186,37 @@ python scripts/extract_subs.py --input "01.mp4" --out-dir "out" --lang zh
 产物与转写**同 schema**（`out/01.json` + `out/01.md`），另存一份 `out/01.srt`，JSON 里 `"engine": "subtitle-track"`。只认**文本**轨：PGS / VobSub 这类图形轨会明确拒绝并提示需要 OCR，烧进画面的硬字幕不在此列。它会连容器时长一起 probe，所以外挂字幕只覆盖部分时长时不会把视频时长报短。退出码 `3` 表示一份都没抽出来，此时照常转写。
 
 > 字幕是字幕，不是逐字稿：作者会省语气词、合并长句、自带断句。产物 MD 头部写明这一点，`qc_check.py` 也会跳过字/段密度两条警告——但重叠、长间隙、片尾话术照旧检查。
+
+### 画面硬字幕（OCR）
+
+字幕已经烧进像素、又没有文本字幕轨时走这一步。要先装 OCR 运行时（约 13 MB 模型随 wheel 一起装，不用另外下载）：
+
+```text
+python -m pip install rapidocr_onnxruntime onnxruntime
+```
+
+```text
+# 先探一下有没有硬字幕（16 帧，几秒钟）
+python scripts/ocr_subs.py --input "01.mp4" --list
+
+# 有就逐帧读，产出同 schema 的 JSON + MD
+python scripts/ocr_subs.py --input "01.mp4" --out-dir "out" --fps 1.0
+```
+
+字幕带的位置不是猜的，是**从 OCR 自己的框反推**出来的，三步：
+
+1. 先按字号裁一次：只留高度在本片 60 分位以上的框。屏幕录制里几十行界面小字在这一步就没了，而且用的是本片自己的分位数，不用为不同分辨率调阈值。
+2. 再为每个框的中心 ±5% 开一个窗打分：`支持度 × min(不同文本数, 8) × 字号权重`。文字从不变化的窗（台标、水印、固定标题）得分趋近 0，自然出局。
+3. 最后收紧到字幕尺寸的框（`h ≥ 0.6 × 中位行高`），上下各留 5% 画面高度的空白再裁剪。
+
+第 3 步那点空白不是余量，是**必要条件**：PP-OCR 的检测器需要行上下有上下文，裁剪线压在字形描边上时它会把一整行读成碎片——实测同一帧 `Topk要用最小的值获得` 在 1.2% 留白下读成 `doL`，5% 留白下读对。
+
+所以黄色字幕不需要任何特殊处理——它只是字，不是颜色问题。
+
+默认只读画面下半幅（`--region 0.50,0.995`）、1 fps 采样。代价是慢：约 0.3 秒一帧，3 分钟视频约 1 分钟，比转写慢。所以它是**按需的第二意见**，不是默认路径。退出码 `3` 表示没有一个文件找到可读的字幕带。
+
+> 旧的纯 Pillow 方案（亮度 + 低饱和 + 行投影）已放弃：同一批素材上，白衬衫所在的行得分 117.8，比真实字幕带还高；而且"饱和度 ≤ 70"会把黄字直接排除。取舍记录见 `ROADMAP.md` 的 v0.7。
+
 
 ### 单条转写
 
@@ -238,6 +299,24 @@ python scripts/qc_check.py "out/*.json" --json      # 严格 JSON，可进 CI
 
 阈值严格大于：`gap > 8.00 s`（8.00 不报，8.01 报）、`overrun > 0.50 s`。用 `--gap` / `--tail` 调整。有 ERROR 或 RED 时，文本与 `--json` 模式都返回退出码 1。
 
+### 听看互校
+
+两份稿子都出来之后，不要人工从头比对：
+
+```text
+python scripts/merge_sources.py --heard "out/01.json" --seen "out/01-ocr.json" --out "out/01.merge.md"
+```
+
+它按时间对齐、逐段算相似度，把结果分成五类：一致 / 接近 / 不一致 / 只有语音 / 只有字幕。MD 只列**需要人看的**那几段，按可疑程度排序，每段给出两边的原文，以及只在一边出现的术语和数字。同名 `.json` 里有全量结果。
+
+四个刻意的设计：
+
+- **不产出"合并稿"**。两份都不可靠，混起来只会更不可靠，而且无法再验证。
+- **数字不一致直接判"不一致"**，哪怕整句相似度 0.95——`K=50` 与 `K=60` 的差别，同音字和字形都看不出来。
+- **先测时间偏移**。短视频的字幕常比语音晚一两秒，不校正的话每一段都会被误判成"不一致"。偏移会写进报告，但**两边原始时间一律不改**。
+- **断句不同不算矛盾**。一条字幕常盖住两段语音，按整句相似度算会打折，看起来像"说错了"。脚本改为看短的那边有多少字能在长的那边找到，命中 ≥ 80% 就降级成"接近"并注明原因；但如果少的是数字，仍然判"不一致"。
+
+
 ### 输出格式
 
 `transcribe.py` 的 JSON 只有段级时间戳，没有词级 `words`：
@@ -281,6 +360,33 @@ python scripts/qc_check.py "out/*.json" --json      # 严格 JSON，可进 CI
 | `--force` | 关 | 已有产物也重抽 |
 | `--timeout` | `120` | 单次 ffmpeg / ffprobe 超时，秒 |
 | `--ffmpeg` / `--ffprobe` | PATH | 指定可执行文件 |
+
+### ocr_subs.py
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--input` | 必填 | 一个或多个视频文件 / 目录 |
+| `--out-dir` | `--list` 时免 | 产物目录（`<key>.json` / `.md`） |
+| `--fps` | `1.0` | 每秒采样帧数；耗时与之严格成正比 |
+| `--region` | `0.50,0.995` | 纵向搜索窗口，按画面高度的比例 |
+| `--min-score` | `0.5` | 低于此置信度的行直接丢弃 |
+| `--no-band` | 关 | 跳过字幕带定位，读整个 `--region`（只用于调试，会读进标题和水印） |
+| `--calib-frames` | `16` | 用于定位字幕带的抽样帧数 |
+| `--max-frames` | `900` | 采样帧上限；超出会自动降 fps 并在输出里说明 |
+| `--list` | 关 | 只探测有没有硬字幕，不写产物 |
+| `--recursive` / `--force` / `--timeout` / `--ffmpeg` / `--ffprobe` | 同 `extract_subs.py` | 目录递归、重跑、超时、可执行文件 |
+
+### merge_sources.py
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--heard` | 必填 | 听的那份 JSON（`transcribe.py` 产物） |
+| `--seen` | 必填 | 看的那份 JSON（`extract_subs.py` 或 `ocr_subs.py` 产物） |
+| `--out` | 必填 | 报告 `.md` 路径；同名 `.json` 写在旁边 |
+| `--agree` | `0.85` | 相似度 ≥ 此值算一致 |
+| `--near` | `0.55` | 相似度 ≥ 此值算接近，低于则不一致 |
+| `--limit` | `40` | MD 最多列多少段（JSON 里是全量） |
+| `--title` | 取 heard 的 tag | 报告标题 |
 
 ### transcribe.py
 
@@ -347,15 +453,17 @@ asr-transcription/
 │   ├── 09-attribution.md     # 第三方归属（本文表格的完整版）
 │   └── 10-commands.md        # 命令速查（bash + PowerShell）
 ├── scripts/
-│   ├── extract_subs.py       # 抽文本字幕轨，产出同 schema 的 JSON + MD
-│   ├── transcribe.py         # 转写，产出 JSON + MD
+│   ├── extract_subs.py       # 看：抽文本字幕轨，产出同 schema 的 JSON + MD
+│   ├── ocr_subs.py           # 看：画面硬字幕 OCR（PP-OCR，逐帧读下半幅）
+│   ├── merge_sources.py      # 听看互校，只列不一致的段落
+│   ├── transcribe.py         # 听：转写，产出 JSON + MD
 │   ├── batch_transcribe.py   # 串行批处理
 │   ├── qc_check.py           # 输入校验 + 四项粗筛 + 三查
 │   └── check_env.py          # 只读环境自检
-├── tests/                    # 四套零依赖测试，共 1222 条断言
+├── tests/                    # 六套零依赖测试，共 1359 条断言
 └── docs/
     ├── 转写经验_通用版.md      # 未拆分的完整原文；与 references 冲突时以 references 为准
-    ├── 字幕识别与OCR_调研与设计.md  # 三条通路与实测数据；字幕轨部分已落地为 v0.6
+    ├── 字幕识别与OCR_调研与设计.md  # 三条通路与实测数据；字幕轨 → v0.6，硬字幕 → v0.7
     └── 参考项目评估_native-subtitle-quote-image.md  # 上游项目可移植技术评估（字幕带定位、帧差异度）
 ```
 
@@ -367,22 +475,26 @@ asr-transcription/
 
 ```powershell
 python -m compileall -q scripts tests
-python tests/run_smoke.py            # 质检契约：36 类输入 × 文本/JSON
+python tests/run_smoke.py            # 质检契约：37 类输入 × 文本/JSON
 python tests/run_transcribe_unit.py  # 回退决策、耗时口径、产物原子写入
 python tests/run_batch_unit.py       # 批处理规划、跳过判据、端到端集成
 python tests/run_subs_unit.py        # 字幕解析、选轨、外挂回落
+python tests/run_ocr_unit.py         # 文本清洗、字幕带定位、cue 合并
+python tests/run_merge_unit.py       # 对齐、相似度分级、时间偏移、报告结构
 ```
 
 实跑结果（2026-11-06）：
 
 ```text
-36 cases x (text + --json), 998 assertions, 0 failures.
+37 cases x (text + --json), 1026 assertions, 0 failures.
 43 assertions, 0 failures.
 102 assertions, 0 failures.
 79 assertions, 0 failures.
+51 assertions, 0 failures.
+58 assertions, 0 failures.
 ```
 
-四套都不需要网络、模型、GPU 或 ffmpeg。批处理的端到端用例用一个假 `transcribe.py` 驱动 `main()`，覆盖成功、失败、跳过、修复后重试、半成品产物；字幕单测把 `ffprobe` 指向不存在的程序，验证外挂字幕在无探针时仍能成稿。
+六套都不需要网络、模型、GPU 或 ffmpeg。批处理的端到端用例用一个假 `transcribe.py` 驱动 `main()`，覆盖成功、失败、跳过、修复后重试、半成品产物；字幕单测把 `ffprobe` 指向不存在的程序，验证外挂字幕在无探针时仍能成稿；OCR 与互校两套只测纯函数，所以装不装 OCR 运行时都能跑。
 
 ### Windows 上的「假绿」陷阱
 
@@ -446,7 +558,9 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 ### 能力边界
 
 - **只有段级时间戳**。没有词级 `words`，没有说话人分离，不能直接导出 SRT / VTT（字幕轨抽取产出的 `.srt` 是源文件自带的，不是转写生成的）。
-- **只抽文本字幕轨，不做画面 OCR**。有外挂 `.srt/.ass/.ssa/.vtt` 或内嵌文本字幕轨时 `extract_subs.py` 直接抽（零推理、`engine=subtitle-track`）；**图形字幕轨（PGS/VobSub/DVB）与烧进画面的硬字幕不支持**——前者会被明确拒绝并提示需要 OCR，后者仍在设计阶段，见 [`docs/字幕识别与OCR_调研与设计.md`](docs/字幕识别与OCR_调研与设计.md)。
+- **"看"的能力分两级，都有边界**。有文本字幕轨或外挂 `.srt/.ass/.ssa/.vtt` 时 `extract_subs.py` 零推理直接抽（`engine=subtitle-track`）；没有就走 `ocr_subs.py` 逐帧 OCR（`engine=ocr`）。**图形字幕轨（PGS/VobSub/DVB）、竖排、花字、被遮挡的字仍然读不了**；OCR 只读画面下半幅，字幕在顶部就找不到；叠进字幕带的界面弹窗会被当成字幕读进来（位置过滤挡不住压在同一水平线上的元素）。它比转写慢（约 0.38 秒一帧），且需要额外装 OCR 运行时——没装时该脚本明确报错退出，另外四个脚本不受影响。
+- **字号太小就读不准**。640×360 这类素材上一行字只有十几像素，同一条字幕在两种留白下会读出不同结果（实测一致率 0.815）；它的产物仍然可用，但错字率明显高于竖屏 720p/1080p。
+- **互校只对齐，不裁决**。`merge_sources.py` 给出"哪几段两边不一致"，谁对谁错要回到音频和画面判断。它不产出合并稿，也不自动改任何一边。
 - **单文件失败不落盘**。直接调 `transcribe.py` 失败时没有产物，只能靠退出码判断。批量场景已覆盖（`_batch/summary.json` 记退出码与错误尾部），单文件场景仍是 `ROADMAP.md` 的 C4。
 - **不报准确率**。没有人工标准答案就不报，这是硬规则，不是谦虚。
 - **SenseVoice 只当第二意见**。它输出没有可用时间戳，中英混读的专名明显弱于主力，不能单独出正式稿。
@@ -498,14 +612,23 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 | whisper.cpp | ggml-org | https://github.com/ggml-org/whisper.cpp | MIT |
 | PyTorch / Transformers / vLLM | 各自开源组织 | 官方文档 | 各项目许可；本仓库明确**不安装** |
 
+### 看：字幕与 OCR
+
+| 项目 / 模型 | 维护方 | 地址 | 许可证 | 用在哪 |
+|---|---|---|---|---|
+| RapidOCR | RapidAI | https://github.com/RapidAI/RapidOCR | Apache-2.0 | `ocr_subs.py` 的检测 + 识别封装，含模型 |
+| PP-OCRv3（`ch_PP-OCRv3_det` / `_rec` / `ch_ppocr_mobile_v2.0_cls`） | 百度 PaddleOCR 团队 | https://github.com/PaddlePaddle/PaddleOCR | Apache-2.0 | 随 RapidOCR wheel 分发的三个 ONNX，合计 13.08 MB |
+
+这三个 ONNX 是**权重**，按上面的 Apache-2.0 使用；RapidOCR 的封装代码同为 Apache-2.0。仓库自身不重分发任何模型文件，`pip install` 时装上。
+
 ### 通用工具与平台
 
 | 项目 | 维护方 | 地址 | 许可证 | 用途 |
 |---|---|---|---|---|
 | FFmpeg / ffprobe | FFmpeg 项目 | https://www.ffmpeg.org/ | LGPL / GPL，依构建选项 | 抽音频、素材体检 |
 | ONNX Runtime | Microsoft | https://github.com/microsoft/onnxruntime | MIT | ONNX 对照方案的推理后端 |
-| NumPy | NumPy 社区 | https://numpy.org/ | BSD-3-Clause | 随依赖带入 |
-| RapidOCR | RapidAI | https://github.com/RapidAI/RapidOCR | Apache-2.0 | 可选的关键帧 OCR 旁证 |
+| NumPy | NumPy 社区 | https://numpy.org/ | BSD-3-Clause | 随依赖带入；OCR 路径逐帧处理图像 |
+| Pillow | Python Pillow 团队 | https://python-pillow.org/ | MIT-CMU | 抽帧后的裁剪与缩放（`ocr_subs.py`） |
 | Hugging Face Hub / `hf-mirror.com` | Hugging Face / 第三方镜像 | https://huggingface.co/ | 平台服务，非依赖 | 模型下载 |
 
 ### 许可边界
@@ -523,7 +646,7 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 
 - **报问题、提需求**：到 [Issues](https://github.com/ChenChen913/asr-transcription-skill/issues)。请附命令、退出码、错误原文，以及 `check_env.py` 的输出（去掉本机路径）。
 - **PR**：欢迎，但没有固定流程，也不保证及时处理。改动前先开 Issue 说清要解决什么，避免大改被拒。
-- **提交前**：四套测试全绿，并在清空 `PYTHONUTF8` / `PYTHONIOENCODING` 的环境复跑一遍（见[开发](#开发)）。
+- **提交前**：六套测试全绿，并在清空 `PYTHONUTF8` / `PYTHONIOENCODING` 的环境复跑一遍（见[开发](#开发)）。
 - **不要提交**：模型权重、音频素材、逐字稿、凭据、本机绝对路径。
 - **不要为了接更多模型而加功能**。这个仓库的目标是转写质量与可靠工作流，不是模型数量。
 

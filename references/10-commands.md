@@ -39,6 +39,27 @@ python scripts/extract_subs.py --input "素材A" "素材B" --out-dir "out" --rec
 
 > 只处理**文本**字幕轨（subrip/ass/mov_text/webvtt 等）；PGS/VobSub 这类图形轨会明确拒绝并提示需要 OCR。退出码 `0` 抽到了、`2` 参数/输入有问题、`3` 一份都没抽出来（此时照常转写）。产物是同样的 `<key>.json` + `<key>.md`，外加一份 `<key>.srt` 原始字幕留档；JSON 里 `"engine": "subtitle-track"`，`qc_check.py` 会据此跳过字/段密度警告。
 
+### 没有字幕轨：读画面里的硬字幕
+
+```bash
+python -m pip install rapidocr_onnxruntime onnxruntime     # 一次性，13 MB 模型随 wheel
+python scripts/ocr_subs.py --input "<素材>" --list                        # 先探有没有会变的字幕带
+python scripts/ocr_subs.py --input "<素材>" --out-dir "out" --fps 1.0     # 逐帧读
+python scripts/ocr_subs.py --input "<素材>" --out-dir "out" --fps 0.5     # 长视频降采样，省一半时间
+python scripts/ocr_subs.py --input "<素材>" --out-dir "out" --region 0.55,0.95   # 字幕更靠下时收窄
+```
+
+> 只读画面下半幅、只认会变化的字幕带（台标/水印/固定标题会被排除）。约 0.38 s/帧，比转写慢，按需跑。退出码 `0` 读出了、`2` 参数或 OCR 运行时装不上、`3` 没有一个文件找到可读的字幕带（回落到转写）。产物 JSON 里 `"engine": "ocr"`，`qc_check.py` 与字幕轨用同一把尺子。
+
+### 听看互校：只列分歧
+
+```bash
+python scripts/merge_sources.py --heard "out/01.json" --seen "out/01-ocr.json" --out "out/01.merge.md"
+python scripts/merge_sources.py --heard "out/01.json" --seen "out/01.srt.json" --out "out/01.merge.md" --limit 20
+```
+
+> 两路按时间对齐（先测偏移，字幕常比语音晚 1–2 s），逐段算相似度，只把「不一致 / 接近 / 只有一边有」的段落列出来。**不产出合并稿、不裁决谁对、不改任何一边的时间戳**。数字不一致一律判「不一致」，哪怕整句相似度 0.95。
+
 ### 用 Skill 自带脚本跑一条
 
 ```bash

@@ -6,26 +6,30 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1222%20offline%20assertions-brightgreen.svg" alt="1222 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1359%20offline%20assertions-brightgreen.svg" alt="1359 offline assertions">
 </p>
 
-An agent-loadable Chinese ASR skill: engine choice, parameters, QC scripts, attribution, 1222 offline assertions.
+An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1359 offline assertions.
 
 > [!NOTE]
 > This repository is AI-assisted. Every script and number has been verified by hand, and the process is recorded in [`ROADMAP.md`](ROADMAP.md). Platforms that were not tested are never described as supported — see [Known limitations](#known-limitations).
 
 ```mermaid
 flowchart LR
-    A["mp4 / mkv source"] -->|"check subtitle tracks first"| S["extract_subs.py<br/>sidecar srt / embedded text track"]
-    A -->|FFmpeg| B["16 kHz mono WAV"]
-    S -->|found| D["out/01.json + out/01.md"]
+    A["mp4 / mkv source"] -->|"hearing: FFmpeg"| B["16 kHz mono WAV"]
+    A -->|"seeing: any subtitle track?"| S["extract_subs.py<br/>sidecar srt / embedded text track"]
+    A -->|"seeing: picture only"| O["ocr_subs.py<br/>PP-OCR, frame by frame"]
     B --> C["transcribe.py<br/>faster-whisper turbo · GPU"]
     C -->|"error is genuinely CUDA"| C2["fall back to CPU int8"]
-    C --> D
-    C2 --> D
-    D --> E["qc_check.py<br/>ERROR / REVIEW"]
-    E --> F["manual checks<br/>first 30 s · last 30 s · long gaps"]
-    F --> G["edit and keep a record"]
+    C --> W["heard: JSON + MD"]
+    C2 --> W
+    S --> W2["seen: JSON + MD"]
+    O --> W3["seen: JSON + MD"]
+    W --> M["merge_sources.py<br/>cross-check"]
+    W2 --> M
+    W3 --> M
+    M --> R["only the disagreeing lines"]
+    R --> E["qc_check.py + manual checks"]
     B -.->|optional| H["SenseVoice q8 GGUF<br/>independent second opinion"]
 ```
 
@@ -42,6 +46,7 @@ Full prerequisites and the environment check are in [Quick start](#quick-start).
 ## Table of contents
 
 - [Why this project](#why-this-project)
+- [Two senses: hearing and seeing](#two-senses-hearing-and-seeing)
 - [Quick start](#quick-start)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -74,6 +79,29 @@ Three rules are written into `SKILL.md`, and repeated here:
 3. **Two versions of the same family are not two pairs of eyes**: turbo is a decoder-pruned large-v3 and shares the encoder, so their errors correlate. An independent second opinion requires a different architecture.
 
 What it is not: it does not train models, publish weights, run a cloud service, or contain any audio. The repository holds process, scripts, and attribution.
+
+## Two senses: hearing and seeing
+
+Two independent routes to the same words, and they fail differently:
+
+| | Hearing (`transcribe.py`) | Seeing (`extract_subs.py` / `ocr_subs.py`) |
+|---|---|---|
+| Input | The audio track | A subtitle track, or the pixels |
+| Strength | Covers the whole clip, real sentence boundaries, natural punctuation | Proper nouns, jargon and numbers are usually right; the punctuation is the author's |
+| Typical failure | Homophones: `RAG`→`RAW`, `Rerank`→`RUNK` | Look-alike characters, dropped characters: `懵逼`→`憎逼`; titles and watermarks read as dialogue |
+
+A real pair from one clip (`懂王AI面试合集` #66, 183 s):
+
+- heard: `TOPK出牌, RUNK金牌, 大模型` / seen: `Top K粗排, Rerank精排, 大模型` — seeing wins this one
+- heard: `蒙逼了` / seen: `憎逼了` — hearing wins this one
+
+So the answer is not to pick a side, and not to blend both into one file. It is three steps:
+
+1. **Hear first**: produce a timestamped transcript. It covers the whole clip and has sentence structure; it is the closest thing to a script.
+2. **See second**: pull the subtitle track, or OCR the picture when there is none. It is independent evidence, not a patch for the transcript.
+3. **Cross-check last**: `merge_sources.py` aligns the two and lists only where they disagree, or where one side has nothing. A human reads those few blocks instead of both documents.
+
+The cross-check also answers two questions along the way: how many seconds the subtitles lag the speech (routine in edited short videos), and which numbers or terms are written differently on each side.
 
 ## Quick start
 
@@ -122,7 +150,7 @@ Look at three things afterwards: `out/01.json` (structured), `out/01.md` (timest
 
 ### Without the Skill mechanism
 
-The five scripts are plain Python 3. Put the repository anywhere and call `python scripts/transcribe.py ...`; no agent runtime required.
+The scripts are plain Python 3: put the repository anywhere and call `python scripts/transcribe.py ...`; no agent runtime required. Only two carry dependencies — `transcribe.py` needs faster-whisper / CTranslate2 plus a model, `ocr_subs.py` needs `rapidocr_onnxruntime` and `onnxruntime`; the other five are standard library only. A missing dependency is named explicitly rather than degrading silently.
 
 To load it as a Skill in another agent tool, follow that tool's documented directory and metadata conventions. **Only the WorkBuddy user-level Skill path has been tested here; this repository does not claim compatibility with other tools.**
 
@@ -133,11 +161,13 @@ To load it as a Skill in another agent tool, follow that tool's documented direc
 | Step | Owner | Where |
 |---|---|---|
 | Environment check | Automated | `scripts/check_env.py` |
-| Subtitle track extraction | Automated | `scripts/extract_subs.py` |
-| Single-file transcription | Automated | `scripts/transcribe.py` |
+| Subtitle track extraction (seeing) | Automated | `scripts/extract_subs.py` |
+| On-screen subtitle OCR (seeing) | Automated, needs the OCR runtime | `scripts/ocr_subs.py` |
+| Single-file transcription (hearing) | Automated | `scripts/transcribe.py` |
 | Batch transcription | Automated | `scripts/batch_transcribe.py` |
 | Transcript QC | Automated | `scripts/qc_check.py` |
-| Regression tests | Automated | the four suites under `tests/` |
+| Hearing/seeing cross-check | Automated | `scripts/merge_sources.py` |
+| Regression tests | Automated | the six suites under `tests/` |
 | Audio extraction, cross-engine comparison, diff alignment, editing, record keeping | Agent workflow | The Skill tells the agent which command to run and how to read the result; no script |
 | Listening to first/last 30 s, glossary, reference transcript, licence review | Manual | Requires human judgement |
 
@@ -156,6 +186,37 @@ python scripts/extract_subs.py --input "01.mp4" --out-dir "out" --lang zh
 The output uses the **same schema** as transcription (`out/01.json` + `out/01.md`), plus `out/01.srt` as an archival copy; the JSON carries `"engine": "subtitle-track"`. Only **text** tracks are handled: PGS / VobSub and friends are refused with an explicit "needs OCR" message, and burned-in subtitles are out of scope. The container duration is probed even on the sidecar path, so a partial sidecar cannot report the video as shorter than it is. Exit code `3` means nothing was extracted — proceed with transcription.
 
 > A subtitle is not a verbatim transcript: authors drop filler words, merge sentences and bring their own punctuation. The MD header says so, and `qc_check.py` skips the character/segment density warnings for this source — overlaps, long gaps and closing phrases are still checked.
+
+### On-screen subtitles (OCR)
+
+Use this when the subtitles are burned into the pixels and no text track exists. The OCR runtime has to be installed first (~13 MB of models ship inside the wheel; nothing else to download):
+
+```text
+python -m pip install rapidocr_onnxruntime onnxruntime
+```
+
+```text
+# probe first: is there a burned-in band at all? (16 frames, seconds)
+python scripts/ocr_subs.py --input "01.mp4" --list
+
+# then read every sampled frame, same schema out
+python scripts/ocr_subs.py --input "01.mp4" --out-dir "out" --fps 1.0
+```
+
+The band is not guessed: it is **derived from the boxes OCR itself returns**, in three steps:
+
+1. Keep only boxes at or above the 60th height percentile *of this clip*. The dozens of UI lines in a screen recording drop out here, and because the cut is a percentile it needs no per-resolution threshold.
+2. Score a ±5% window around each box centre: `support × min(distinct texts, 8) × size weight`. Text that never changes (logo, watermark, fixed title) scores near zero and drops out on its own.
+3. Tighten to subtitle-sized boxes (`h ≥ 0.6 × median line height`) and keep 5% of the frame height above and below before cropping.
+
+That third step is not slack, it is **required**: PP-OCR's detector needs vertical context around a line, and a crop that lands on the glyph outline makes it read a whole line as a fragment — on one frame `Topk要用最小的值获得` came back as `doL` with 1.2% padding and read correctly with 5%.
+
+Yellow subtitles therefore need no special case — they are just text, not a colour problem.
+
+By default it reads only the lower half (`--region 0.50,0.995`) at 1 fps. The cost is real: about 0.3 s per frame, so a 3-minute clip takes roughly a minute — slower than transcribing it. That is why this is an **on-demand second opinion**, not the default path. Exit code `3` means no file had a readable subtitle band.
+
+> The earlier pure-Pillow plan (bright, low-saturation pixels projected onto rows) was dropped: on the same clips a white shirt scored 117.8, higher than the real subtitle band, and the "saturation ≤ 70" gate excluded yellow text outright. The decision is recorded under v0.7 in `ROADMAP.md`.
+
 
 ### Single file
 
@@ -238,6 +299,23 @@ A real run (synthetic sample, shown for the grading):
 
 Thresholds are strict: `gap > 8.00 s` (8.00 passes, 8.01 fails) and `overrun > 0.50 s`. Adjust with `--gap` / `--tail`. In both text and `--json` mode, the exit code is 1 when there is any ERROR or RED.
 
+### Hearing/seeing cross-check
+
+Once both documents exist, do not diff them by hand:
+
+```text
+python scripts/merge_sources.py --heard "out/01.json" --seen "out/01-ocr.json" --out "out/01.merge.md"
+```
+
+It aligns the two by time and scores each pair, sorting the result into five buckets: agree / near / differ / heard-only / seen-only. The MD lists **only the blocks a human has to read**, worst first, with both texts side by side plus any term or number that appears on one side only. The same-named `.json` carries the full set.
+
+Four deliberate designs:
+
+- **No "merged transcript"**. Both sides are unreliable; blending them only makes a less reliable document that can no longer be checked.
+- **A differing number is always `differ`**, even when the sentence scores 0.95 — `K=50` vs `K=60` is invisible to both homophone and glyph similarity.
+- **The time offset is measured first**. Subtitles in short edited videos routinely trail the speech by a second or two; without correcting for it every block would be misread as a conflict. The offset is reported, but **neither side's original timestamps are ever changed**.
+- **A different sentence split is not a contradiction**. One cue often covers two spoken sentences, which drags the whole-sentence score down and looks like an error. The script instead checks how much of the shorter side can be found in the longer one: at ≥ 80% it drops to `near` and says why — unless what is missing is a number, which still counts as `differ`.
+
 ### Output format
 
 The JSON from `transcribe.py` has segment-level timestamps only, no word-level `words`:
@@ -281,6 +359,33 @@ There is **no config file, no API key, and no account**. Every parameter is a CL
 | `--force` | off | Re-extract even if output exists |
 | `--timeout` | `120` | Per ffmpeg / ffprobe call, seconds |
 | `--ffmpeg` / `--ffprobe` | PATH | Explicit binaries |
+
+### ocr_subs.py
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--input` | required | One or more video files / directories |
+| `--out-dir` | not needed with `--list` | Output directory (`<key>.json` / `.md`) |
+| `--fps` | `1.0` | Sampled frames per second; runtime is strictly proportional |
+| `--region` | `0.50,0.995` | Vertical search window, as a fraction of frame height |
+| `--min-score` | `0.5` | Lines below this confidence are dropped outright |
+| `--no-band` | off | Skip band detection and read the whole `--region` (debugging only; it reads titles and watermarks too) |
+| `--calib-frames` | `16` | Sample frames used to locate the band |
+| `--max-frames` | `900` | Frame cap; beyond it the fps is lowered automatically and the output says so |
+| `--list` | off | Probe for burned-in subtitles, write nothing |
+| `--recursive` / `--force` / `--timeout` / `--ffmpeg` / `--ffprobe` | as `extract_subs.py` | Recursion, re-run, timeout, binaries |
+
+### merge_sources.py
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--heard` | required | The heard JSON (`transcribe.py` output) |
+| `--seen` | required | The seen JSON (`extract_subs.py` or `ocr_subs.py` output) |
+| `--out` | required | Report `.md` path; the same-named `.json` goes beside it |
+| `--agree` | `0.85` | Similarity at or above this counts as agreement |
+| `--near` | `0.55` | At or above this is "near"; below is "differ" |
+| `--limit` | `40` | Max blocks in the MD (the JSON has everything) |
+| `--title` | the heard tag | Report title |
 
 ### transcribe.py
 
@@ -347,12 +452,14 @@ asr-transcription/
 │   ├── 09-attribution.md     # full third-party attribution
 │   └── 10-commands.md        # command cheat sheet (bash + PowerShell)
 ├── scripts/
-│   ├── extract_subs.py       # embedded text subtitles, same JSON + MD schema
-│   ├── transcribe.py         # transcription, JSON + MD
+│   ├── extract_subs.py       # seeing: pull an embedded text subtitle track, same schema
+│   ├── ocr_subs.py           # seeing: burned-in subtitles via PP-OCR, frame by frame
+│   ├── merge_sources.py      # cross-check the two sides, list only the conflicts
+│   ├── transcribe.py         # hearing: transcription, JSON + MD
 │   ├── batch_transcribe.py   # serial batch runner
 │   ├── qc_check.py           # validation + four coarse metrics + three checks
 │   └── check_env.py          # read-only environment check
-├── tests/                    # four zero-dependency suites, 1222 assertions
+├── tests/                    # six zero-dependency suites, 1359 assertions
 └── docs/
     ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
     ├── 字幕识别与OCR_调研与设计.md  # three routes and measurements; the track part shipped as v0.6
@@ -367,22 +474,26 @@ Three loading levels: `name` + `description` always resident → `SKILL.md` on t
 
 ```powershell
 python -m compileall -q scripts tests
-python tests/run_smoke.py            # QC contract: 36 inputs x text/JSON
+python tests/run_smoke.py            # QC contract: 37 inputs x text/JSON
 python tests/run_transcribe_unit.py  # fallback decision, timing semantics, atomic output
 python tests/run_batch_unit.py       # batch planning, skip rule, end-to-end
 python tests/run_subs_unit.py        # subtitle parsing, track choice, sidecar fallback
+python tests/run_ocr_unit.py         # text cleanup, band detection, cue merging
+python tests/run_merge_unit.py       # alignment, similarity tiers, time offset, report shape
 ```
 
 Actual output (2026-11-06):
 
 ```text
-36 cases x (text + --json), 998 assertions, 0 failures.
+37 cases x (text + --json), 1026 assertions, 0 failures.
 43 assertions, 0 failures.
 102 assertions, 0 failures.
 79 assertions, 0 failures.
+51 assertions, 0 failures.
+58 assertions, 0 failures.
 ```
 
-None of the four needs network, a model, a GPU, or ffmpeg. The batch end-to-end case drives `main()` with a fake `transcribe.py`, covering success, failure, skipping, retry after a fix, and half-written artefacts; the subtitle suite points `ffprobe` at a missing binary to prove a sidecar still produces a transcript without a probe.
+None of the six needs network, a model, a GPU, or ffmpeg. The batch end-to-end case drives `main()` with a fake `transcribe.py`, covering success, failure, skipping, retry after a fix, and half-written artefacts; the subtitle suite points `ffprobe` at a missing binary to prove a sidecar still produces a transcript without a probe; the OCR and cross-check suites only touch pure functions, so they run with or without the OCR runtime installed.
 
 ### The "false green" trap on Windows
 
@@ -446,7 +557,8 @@ A: Not directly. Run `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le out.wa
 ### Capability boundaries
 
 - **Segment-level timestamps only.** No word-level `words`, no speaker diarisation, no direct SRT / VTT export (the `.srt` written by `extract_subs.py` is the source track, not generated by transcription).
-- **Text subtitle tracks only, no on-screen OCR.** `extract_subs.py` reads a sidecar `.srt/.ass/.ssa/.vtt` or an embedded **text** track (no inference, `engine=subtitle-track`). **Bitmap tracks (PGS/VobSub/DVB) and burned-in subtitles are not supported** — bitmap tracks are refused with a "needs OCR" message, and burned-in text is still in the design stage, see [`docs/字幕识别与OCR_调研与设计.md`](docs/字幕识别与OCR_调研与设计.md).
+- **Seeing comes in two grades, both with edges.** `extract_subs.py` reads a sidecar `.srt/.ass/.ssa/.vtt` or an embedded **text** track with no inference (`engine=subtitle-track`); when there is none, `ocr_subs.py` reads the pixels frame by frame (`engine=ocr`). **Bitmap tracks (PGS/VobSub/DVB), vertical text, styled captions and occluded text are still unreadable**; OCR only searches the lower half, so subtitles at the top are never found; a UI popup overlapping the band is read as dialogue (a positional filter cannot separate elements on the same horizontal line). It is slower than transcribing (~0.38 s per frame) and needs the OCR runtime — without it that one script fails loudly and the other four are unaffected.
+- **Small text is read less reliably.** At 640×360 a line is a dozen pixels tall and the same cue reads differently under two crop paddings (measured agreement 0.815). The output is still usable, but the error rate is clearly higher than on a 720p/1080p vertical clip.
 - **Single-file failures leave no artefact.** Calling `transcribe.py` directly on a failing input produces nothing; only the exit code tells you. Batch covers it (`_batch/summary.json` records exit code and error tail); the single-file case is still C4 in `ROADMAP.md`.
 - **No accuracy claims.** Without a human reference there is no number. That is a rule, not modesty.
 - **SenseVoice is a second opinion only.** Its output has no usable timestamps, and it is clearly weaker on mixed Chinese/English proper nouns. It cannot produce a final transcript alone.
@@ -498,14 +610,23 @@ This repository trains and ships no models. It calls the projects below. **Code 
 | whisper.cpp | ggml-org | https://github.com/ggml-org/whisper.cpp | MIT |
 | PyTorch / Transformers / vLLM | their respective organisations | official docs | per project; explicitly **not installed** here |
 
+### Seeing: subtitles and OCR
+
+| Project / model | Maintainer | URL | Licence | Used for |
+|---|---|---|---|---|
+| RapidOCR | RapidAI | https://github.com/RapidAI/RapidOCR | Apache-2.0 | Detection + recognition wrapper in `ocr_subs.py`, models included |
+| PP-OCRv3 (`ch_PP-OCRv3_det` / `_rec` / `ch_ppocr_mobile_v2.0_cls`) | PaddleOCR team, Baidu | https://github.com/PaddlePaddle/PaddleOCR | Apache-2.0 | The three ONNX files shipped inside the RapidOCR wheel, 13.08 MB total |
+
+Those three ONNX files are **weights**, used under the Apache-2.0 terms above; RapidOCR's wrapper code is Apache-2.0 as well. This repository redistributes no model files — `pip install` pulls them in.
+
 ### General tools and platforms
 
 | Project | Maintainer | URL | Licence | Used for |
 |---|---|---|---|---|
 | FFmpeg / ffprobe | FFmpeg project | https://www.ffmpeg.org/ | LGPL / GPL depending on build | Audio extraction, source inspection |
-| ONNX Runtime | Microsoft | https://github.com/microsoft/onnxruntime | MIT | Backend for the ONNX comparison |
-| NumPy | NumPy community | https://numpy.org/ | BSD-3-Clause | Pulled in as a dependency |
-| RapidOCR | RapidAI | https://github.com/RapidAI/RapidOCR | Apache-2.0 | Optional keyframe OCR cross-check |
+| ONNX Runtime | Microsoft | https://github.com/microsoft/onnxruntime | MIT | Inference backend, including the OCR models |
+| NumPy | NumPy community | https://numpy.org/ | BSD-3-Clause | Pulled in as a dependency by both inference paths |
+| Pillow | Python Pillow contributors | https://python-pillow.org/ | MIT-CMU | Cropping and resizing frames before OCR |
 | Hugging Face Hub / `hf-mirror.com` | Hugging Face / third-party mirror | https://huggingface.co/ | platform service, not a dependency | Model downloads |
 
 ### Licence boundary

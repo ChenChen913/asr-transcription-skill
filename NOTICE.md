@@ -14,9 +14,10 @@
 下列内容随本仓库被**引用或调用**，但**不属于**本仓库，也未在此授予任何权利：
 
 - 第三方模型权重（例如 OpenAI Whisper `large-v3` / `large-v3-turbo`、
-  SenseVoiceSmall、Paraformer）——权重许可以各自模型卡为准。
+  SenseVoiceSmall、Paraformer，以及画面 OCR 用的 PP-OCRv3 检测/识别/方向
+  三个 ONNX）——权重许可以各自模型卡或仓库为准。
 - 第三方推理引擎与运行时（例如 faster-whisper、CTranslate2、FunASR、
-  llama.cpp / GGUF 运行时、ONNX Runtime）。
+  llama.cpp / GGUF 运行时、ONNX Runtime、RapidOCR）。
 - 上述项目自带的二进制、示例、测试数据与文档。
 
 **代码许可与模型权重许可是两件事**，必须分别核对。逐项目的维护方、地址、

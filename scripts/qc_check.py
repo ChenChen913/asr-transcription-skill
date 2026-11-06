@@ -39,14 +39,14 @@ note "INVALID TIMELINE" and all three time metrics null, while text-derived
 metrics (chars / punct_per_100 / chars_per_min) remain valid. --json output is
 always strict JSON (non-finite values are emitted as null, never NaN/Infinity).
 
-Two producer baselines. Files carrying "engine": "subtitle-track" were written
-by scripts/extract_subs.py from a real subtitle track, not by ASR. Subtitle
-wording is condensed on purpose, so chars/min and segments/min sit well below
-the ASR bands; only those two density warnings are skipped for them, and the
-report says "source": "subtitle-track". Every other check - overlaps, long
-gaps, tail, prompt echoes - is source-independent and still runs. Density is
-skipped, not relaxed: inventing a second numeric band would imply a precision
-no measurement here supports.
+Three producer baselines. "engine": "subtitle-track" (scripts/extract_subs.py)
+and "engine": "ocr" (scripts/ocr_subs.py) are both read off the screen rather
+than heard. Subtitle wording is condensed on purpose, so chars/min and
+segments/min sit well below the ASR bands; only those two density warnings are
+skipped for them, and the report says "source": "subtitle-track" / "ocr".
+Every other check - overlaps, long gaps, tail, prompt echoes - is
+source-independent and still runs. Density is skipped, not relaxed: inventing a
+second numeric band would imply a precision no measurement here supports.
 
 Inputs WITHOUT real timestamps (single placeholder segment covering the whole
 audio, or "timestamps": false) are flagged: tail/gap metrics are N/A.
@@ -270,7 +270,8 @@ def check(path, gap_limit, tail_limit):
     # warnings. Only the density pair is skipped - overlaps, gaps, tail and
     # prompt echoes are source-independent and still apply.
     source = str(d.get("engine") or "asr")
-    is_subs = source == "subtitle-track"
+    # Both screen-derived producers write reading-sized lines, not speech.
+    is_subs = source in ("subtitle-track", "ocr")
 
     text = "".join(s["t"] for s in segs)
     norm = unicodedata.normalize("NFKC", text)

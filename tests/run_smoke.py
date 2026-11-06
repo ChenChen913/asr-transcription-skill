@@ -187,6 +187,11 @@ CASES = [
      {"duration": 60, "timestamps": True, "engine": "subtitle-track",
       "segments": [seg(0, 10, "第一句。"), seg(9, 20, "第二句。")]},
      1, "REVIEW", ["overlapping segments"], ["char density"]),
+    ("ocr_no_density_warn",
+     "OCR output is read off the screen, not heard; same ruler as a track",
+     {"duration": 60, "timestamps": True, "engine": "ocr",
+      "segments": [seg(i * 9.0, i * 9.0 + 7.0, "短句。") for i in range(6)]},
+     0, "OK", [], ["char density", "check split style"]),
 ]
 
 
@@ -297,6 +302,10 @@ def main():
                         if name.startswith("subtitle_track"):
                             assert_that(row.get("source") == "subtitle-track",
                                         "%s source=%r expected subtitle-track"
+                                        % (tag, row.get("source")))
+                        if name.startswith("ocr_"):
+                            assert_that(row.get("source") == "ocr",
+                                        "%s source=%r expected ocr"
                                         % (tag, row.get("source")))
                         for k in LEGACY_KEYS + NEW_KEYS:
                             assert_that(k in row, "%s legacy/new key %r lost" % (tag, k))

@@ -49,8 +49,19 @@
 | FFmpeg / ffprobe | FFmpeg 项目 | `https://ffmpeg.org/`（`https://github.com/FFmpeg/FFmpeg` 为镜像） | LGPL / GPL，**依构建选项而定**（GitHub 标 `NOASSERTION`） | §2 抽音频、§2.1 素材体检 |
 | ONNX Runtime | Microsoft | `https://github.com/microsoft/onnxruntime` | MIT | sherpa-onnx 与 OCR 的推理后端 |
 | NumPy | NumPy 社区 | `https://numpy.org/` | BSD-3-Clause | 随依赖带入 |
-| RapidOCR | RapidAI | `https://github.com/RapidAI/RapidOCR` | Apache-2.0 | §5.2 / §5.5 的可选 OCR 旁路 |
+| Pillow | Python Pillow 贡献者 | `https://python-pillow.org/` | MIT-CMU | `ocr_subs.py` 裁剪 / 缩放帧 |
+| RapidOCR | RapidAI | `https://github.com/RapidAI/RapidOCR` | Apache-2.0 | `ocr_subs.py` 的检测 + 识别封装（v0.7 起是正式通路，不再是「旁路」） |
 | Hugging Face Hub / `hf-mirror.com` | Hugging Face / 第三方镜像站 | `https://huggingface.co/` | 平台服务，非本文依赖 | §7.3 下载模型时的镜像与缓存说明 |
+
+### A.5 画面 OCR 的模型权重
+
+| 模型 | 维护方 | 官方地址 | 许可证 | 用途 |
+|---|---|---|---|---|
+| `ch_PP-OCRv3_det_infer.onnx` | 百度 PaddleOCR 团队 | `https://github.com/PaddlePaddle/PaddleOCR` | Apache-2.0 | 文本检测（2.32 MB） |
+| `ch_PP-OCRv3_rec_infer.onnx` | 同上 | 同上 | Apache-2.0 | 文本识别（10.20 MB） |
+| `ch_ppocr_mobile_v2.0_cls_infer.onnx` | 同上 | 同上 | Apache-2.0 | 方向分类（0.56 MB）；本仓库 `use_cls=False`，实际不加载 |
+
+三个 ONNX 合计 13.08 MB，**随 `rapidocr_onnxruntime` 的 wheel 分发**，本仓库不重分发任何模型文件。这三个是**权重**，与 PaddleOCR 的代码许可分别核对；按 2026-11-06 的仓库信息为 Apache-2.0。
 
 > **免责与核对**：以上归属与许可证按 2026-11-05 的官方仓库信息登记，可能随组织调整、许可证变更而失效；商用前请以当次官方仓库和模型卡为准。本文不对上述项目主张任何权利，所有经验性结论（速度、资源、质检表现）是本文作者的实测记录，与项目官方无关。
 >
