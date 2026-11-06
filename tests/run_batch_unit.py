@@ -202,8 +202,64 @@ def case_prev_rotation(tmp):
 
     if os.path.exists(p):
         os.remove(p)
-    bt.stage_aside(p)          # nothing to move: must not raise
+    eq(bt.stage_aside(p), None, "staging nothing is not an error")
     ok(not os.path.exists(p), "stage_aside is a no-op when there is no output")
+
+
+def case_stage_aside_failure(tmp):
+    # Fail exactly the second rename: JSON staged, .md backup refused. The
+    # first half has already moved and must be rolled back.
+    real_replace = bt.os.replace
+
+    def flaky(src, dst, **kw):
+        if str(dst).endswith(".md.prev"):
+            raise OSError("simulated: .md backup refused")
+        return real_replace(src, dst, **kw)
+
+    p = os.path.join(tmp, "s.json")
+    m = os.path.join(tmp, "s.md")
+    touch(p, GOOD)
+    touch(m, "# 旧稿\n")
+    bt.os.replace = flaky
+    try:
+        err = bt.stage_aside(p)
+    finally:
+        bt.os.replace = real_replace
+    ok(err and "could not stage" in err, "a failed backup is reported, not swallowed")
+    ok("s.md" in (err or ""), "the error names the file that failed")
+    ok(os.path.exists(p), "the already-moved JSON is rolled back")
+    with open(p, encoding="utf-8") as fh:
+        eq(json.load(fh), GOOD,
+           "the rolled-back JSON still has its original content")
+    ok(os.path.exists(m), "the .md was never moved")
+    ok(not os.path.exists(p + ".prev"), "no half-staged .prev is left behind")
+
+    # run_one must stop before invoking transcribe.py when staging fails.
+    wav = os.path.join(tmp, "in.wav")
+    touch(wav, "RIFF")
+    out = os.path.join(tmp, "out2")
+    os.makedirs(out)
+    q = os.path.join(out, "q.json")
+    touch(q, GOOD)
+    touch(os.path.join(out, "q.md"), "# 旧稿\n")
+    opts = {"out_dir": out, "timeout": 10, "force": True,
+            "python": sys.executable, "script": "never-called.py",
+            "model": "M", "device": "cpu", "compute": None, "language": "zh"}
+    real_run, called = bt.subprocess.run, []
+
+    def spy(cmd, **kw):
+        called.append(cmd)
+        return bt.subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    bt.os.replace, bt.subprocess.run = flaky, spy
+    try:
+        rec = bt.run_one(wav, q, "q", opts)
+    finally:
+        bt.os.replace, bt.subprocess.run = real_replace, real_run
+    eq(rec["status"], "failed", "a staging failure fails the task")
+    ok("stage" in rec["error"], "the failure reason reaches the summary")
+    eq(called, [], "transcribe.py is never started after a staging failure")
+    ok(os.path.exists(q), "the old transcript is still in place")
 
 
 def case_needs_extract():
@@ -221,32 +277,118 @@ def case_needs_extract():
 
 
 def case_extract_audio(tmp):
+    import wave as _wave
+
+    def make_wav(p, rate=16000, channels=1, width=2, seconds=0.25):
+        with _wave.open(p, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(width)
+            w.setframerate(rate)
+            w.writeframes(b"\0" * int(seconds * rate) * width * channels)
+
+    good = os.path.join(tmp, "good.wav")
+    make_wav(good)
+    with open(good, "rb") as fh:
+        data = fh.read()
+    eq(bt.wav_ok(good), None, "a complete 16 kHz mono WAV passes validation")
+
+    junk = os.path.join(tmp, "junk.wav")
+    touch(junk, "R" * 100)
+    ok(bt.wav_ok(junk), "a >44-byte non-WAV is not a valid cache")
+    slow = os.path.join(tmp, "slow.wav")
+    make_wav(slow, rate=8000)
+    ok("16000" in (bt.wav_ok(slow) or ""), "a wrong sample rate is refused")
+    stereo = os.path.join(tmp, "stereo.wav")
+    make_wav(stereo, channels=2)
+    ok("channels" in (bt.wav_ok(stereo) or ""), "a wrong channel count is refused")
+    trunc = os.path.join(tmp, "trunc.wav")
+    with open(trunc, "wb") as fh:
+        fh.write(data[:len(data) // 2])
+    ok("truncated" in (bt.wav_ok(trunc) or ""),
+       "a WAV whose data chunk ends early is refused")
+
     # A WAV input never touches ffmpeg, so the path comes straight back.
     wav = os.path.join(tmp, "in.wav")
     touch(wav, "RIFF")
     eq(bt.extract_audio(wav, "in", os.path.join(tmp, "out"), 10), (wav, None),
        "a WAV is returned untouched")
 
-    # A cached decode is reused: point FFMPEG at a command that cannot exist,
-    # so any attempt to decode would fail loudly instead of silently passing.
-    real_ffmpeg = bt.FFMPEG
-    bt.FFMPEG = "definitely-not-ffmpeg-xyz"
+    out = os.path.join(tmp, "out")
+    real_ffmpeg, real_run = bt.FFMPEG, bt.subprocess.run
     try:
-        cached = bt.audio_cache_path(os.path.join(tmp, "out"), "cached")
+        # No ffmpeg at all: a VALID cache is reused, a missing one fails loudly.
+        bt.FFMPEG = "definitely-not-ffmpeg-xyz"
+        cached = bt.audio_cache_path(out, "cached")
         os.makedirs(os.path.dirname(cached), exist_ok=True)
-        with open(cached, "wb") as fh:
-            fh.write(b"R" * 100)
-        eq(bt.extract_audio(os.path.join(tmp, "x.mp4"), "cached",
-                            os.path.join(tmp, "out"), 10), (cached, None),
-           "an existing decode is reused without calling ffmpeg")
+        shutil.copyfile(good, cached)
+        eq(bt.extract_audio(os.path.join(tmp, "x.mp4"), "cached", out, 10),
+           (cached, None), "a valid existing decode is reused")
 
-        got, err = bt.extract_audio(os.path.join(tmp, "y.mp4"), "fresh",
-                                    os.path.join(tmp, "out"), 10)
+        got, err = bt.extract_audio(os.path.join(tmp, "y.mp4"), "fresh", out, 10)
         eq(got, None, "no ffmpeg means no output path")
         ok("ffmpeg not found" in (err or ""), "the error says ffmpeg is missing")
         ok("y.mp4" in (err or ""), "the error names the input")
+
+        def ok_run(cmd, **kw):
+            shutil.copyfile(good, cmd[-1])
+            return bt.subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        def parts(d):
+            return [n for n in os.listdir(d) if ".part-" in n]
+
+        # A corrupt cache must be re-decoded, not trusted because it is big.
+        broken = bt.audio_cache_path(out, "broken")
+        with open(broken, "wb") as fh:
+            fh.write(b"R" * 4096)
+        bt.subprocess.run = ok_run
+        got, err = bt.extract_audio(os.path.join(tmp, "z.mp4"), "broken", out, 10)
+        eq(got, broken, "a corrupt cache triggers a fresh decode")
+        eq(err, None, "and the fresh decode succeeds")
+        eq(bt.wav_ok(broken), None, "the cache is now a valid WAV")
+        ok(not parts(os.path.dirname(broken)), "no .part file survives success")
+
+        # ffmpeg fails after writing a half file: nothing reusable may remain.
+        def fail_run(cmd, **kw):
+            with open(cmd[-1], "wb") as fh:
+                fh.write(data[:len(data) // 2])
+            return bt.subprocess.CompletedProcess(cmd, 1, b"", b"decode error")
+
+        bt.subprocess.run = fail_run
+        got, err = bt.extract_audio(os.path.join(tmp, "a.mp4"), "fail", out, 10)
+        eq(got, None, "a failed decode returns no path")
+        ok("ffmpeg failed" in (err or ""), "the error reports ffmpeg's failure")
+        ok(not os.path.exists(bt.audio_cache_path(out, "fail")),
+           "no cache is published after a failed decode")
+        ok(not parts(os.path.dirname(broken)), "the .part file is cleaned up")
+
+        # Timeout is the most likely way to leave a large truncated WAV behind.
+        def timeout_run(cmd, **kw):
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"R" * 10000)
+            raise bt.subprocess.TimeoutExpired(cmd, 10)
+
+        bt.subprocess.run = timeout_run
+        got, err = bt.extract_audio(os.path.join(tmp, "b.mp4"), "slow", out, 10)
+        eq(got, None, "a timed-out decode returns no path")
+        ok("timed out" in (err or ""), "the error says it timed out")
+        ok(not os.path.exists(bt.audio_cache_path(out, "slow")),
+           "no cache is published after a timeout")
+        ok(not parts(os.path.dirname(broken)), "the .part file is cleaned up")
+
+        # ffmpeg says success but writes garbage: validation must catch it.
+        def liar_run(cmd, **kw):
+            shutil.copyfile(trunc, cmd[-1])
+            return bt.subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        bt.subprocess.run = liar_run
+        got, err = bt.extract_audio(os.path.join(tmp, "c.mp4"), "liar", out, 10)
+        eq(got, None, "exit 0 with a truncated WAV is still a failure")
+        ok("incomplete WAV" in (err or ""), "the error names the bad output")
+        ok(not os.path.exists(bt.audio_cache_path(out, "liar")),
+           "and no truncated cache is published")
     finally:
         bt.FFMPEG = real_ffmpeg
+        bt.subprocess.run = real_run
 
 
 # ---------------------------------------------------------------- command ---
@@ -519,6 +661,7 @@ def main():
         case_collisions(tmp)
         case_is_done(tmp)
         case_prev_rotation(tmp)
+        case_stage_aside_failure(tmp)
         case_summary(tmp)
         case_cli(tmp)
         case_integration(tmp)

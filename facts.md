@@ -16,10 +16,10 @@
    - `python tests/run_smoke.py` → `40 cases x (text + --json), 1104 assertions, 0 failures.`
    - `python tests/run_transcribe_unit.py` → `43 assertions, 0 failures.`
    - `python tests/run_subs_unit.py` → `79 assertions, 0 failures.`
-   - `python tests/run_batch_unit.py` → `114 assertions, 0 failures.`
-   - `python tests/run_ocr_unit.py` → `80 assertions, 0 failures.`
-   - `python tests/run_merge_unit.py` → `65 assertions, 0 failures.`
-   - 合计 **1485** 条断言；全部零依赖、不联网、不需要模型/GPU。
+   - `python tests/run_batch_unit.py` → `145 assertions, 0 failures.`
+   - `python tests/run_ocr_unit.py` → `106 assertions, 0 failures.`
+   - `python tests/run_merge_unit.py` → `74 assertions, 0 failures.`
+   - 合计 **1551** 条断言；全部零依赖、不联网、不需要模型/GPU。
 7. **构建命令**：无构建步骤。语法检查 `python -m compileall -q scripts tests`。
 8. **目录结构**（`git ls-files | wc -l` → 26 个受版本控制文件）：
    - `SKILL.md`（126 行）— 主文件：触发条件 + 流程骨架 + 路由表 + 三条铁律
@@ -67,8 +67,8 @@
 
 ## B. 需人工补充（已由作者既有文档提取并经本人确认）
 
-- **一句话描述（中文）**：给 Agent 加载的中文音视频转写技能包：听写、字幕与画面 OCR、两路互校、质检脚本与第三方归属，附 1485 条离线断言。
-- **一句话描述（英文）**：An agent-loadable Chinese ASR skill: hearing, subtitles, on-screen OCR, cross-checking, QC scripts and attribution, with 1485 offline assertions.
+- **一句话描述（中文）**：给 Agent 加载的中文音视频转写技能包：听写、字幕与画面 OCR、两路互校、质检脚本与第三方归属，附 1551 条离线断言。
+- **一句话描述（英文）**：An agent-loadable Chinese ASR skill: hearing, subtitles, on-screen OCR, cross-checking, QC scripts and attribution, with 1551 offline assertions.
 - **为什么做这个项目**：来源 `ROADMAP.md` v0.1 条目 + `SKILL.md`「目的」+ `README.md` 旧版第 1 节。核心：多轮实测沉淀，失败多来自流程而非模型。
 - **目标用户**：要把中文口播视频转成可复核稿件的 Windows 用户（有 Python 基础、能读命令行）；以及接手的 Agent。
 - **与同类方案的差异**：不做模型封装或云服务；把「质检分级 + 人工三查 + 归属登记」写进流程；没有可信标准答案就不报准确率。

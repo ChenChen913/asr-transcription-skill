@@ -210,6 +210,43 @@ def case_load(tmp):
     except SystemExit:
         ok(True, "empty segments abort with a message")
 
+    # qc_check's rule applies here too: parseable timestamps are not a valid
+    # timeline. load() used to clamp e<s and silently sort out-of-order input.
+    cases = {
+        "end_before_start": [{"s": 2, "e": 1, "t": "甲"}],
+        "negative_start": [{"s": -1, "e": 2, "t": "甲"}],
+        "out_of_order": [{"s": 0, "e": 2, "t": "甲"},
+                         {"s": 4, "e": 6, "t": "乙"},
+                         {"s": 2, "e": 3, "t": "丙"}],
+        "nan_start": [{"s": float("nan"), "e": 2, "t": "甲"}],
+        "string_start": [{"s": "0", "e": 2, "t": "甲"}],
+        "bool_start": [{"s": True, "e": 2, "t": "甲"}],
+        "missing_end": [{"s": 0, "t": "甲"}],
+    }
+    for label, segs in cases.items():
+        p = os.path.join(tmp, label + ".json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"duration": 10, "segments": segs}, fh, ensure_ascii=False)
+        try:
+            mg.load(p, "heard")
+            ok(False, "%s must be refused" % label)
+        except SystemExit as exc:
+            ok("invalid timeline" in str(exc) and "qc_check" in str(exc),
+               "%s is refused with a pointer to qc_check" % label)
+
+    ok(mg.validate_timeline([{"s": 0, "e": 3, "t": "甲"},
+                             {"s": 2, "e": 5, "t": "乙"}]) is None,
+       "overlap is allowed: qc_check calls it REVIEW, not ERROR")
+
+    overlap = os.path.join(tmp, "overlap.json")
+    with open(overlap, "w", encoding="utf-8") as fh:
+        json.dump({"duration": 10, "segments": [
+            {"s": 0, "e": 3, "t": "甲"}, {"s": 2, "e": 5, "t": "乙"}]},
+            fh, ensure_ascii=False)
+    got = mg.load(overlap, "heard")
+    eq([c["e"] for c in got["segs"]], [3.0, 5.0],
+       "timestamps are loaded exactly as written, not clamped or sorted")
+
 
 # ------------------------------------------------------------------- report ---
 

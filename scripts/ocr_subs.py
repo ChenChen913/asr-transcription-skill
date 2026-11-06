@@ -74,6 +74,7 @@ HALF_BAND = 0.05               # half-height of the window scored around each ce
 STACK_GAP = 0.5                # two y clusters > half a line apart = stacked lines
 CALIB_FRAMES = 16
 MAX_FRAMES = 900
+LOW_FPS = 0.5               # at or below this, cues are shorter than the gap
 CJK = ("\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
        "\u3040-\u30ff\uac00-\ud7af")
 # Class *body*, not a whole class: these pieces get spliced into other classes.
@@ -324,7 +325,16 @@ def furniture_texts(frame_lines, fps):
     five-second floor. A clip whose every line is held for ten seconds has no
     fast line, so nothing is dropped.
 
-    Returns (texts_to_drop, report). The report feeds the header and `params`,
+    The return value is a set of (slot, frame) pairs, NOT a set of texts. The
+    earlier version returned the *strings* it saw in long runs and the caller
+    deleted every occurrence of those strings across the whole video. That is
+    too wide: a chapter card held for 15 s and the same sentence spoken later
+    as a 2 s subtitle share a string, and the real subtitle was deleted with
+    the card. What was judged to be furniture is one *run*, so only the frames
+    of that run are removed. It also drops OCR jitter variants of the card
+    without ever looking them up elsewhere in the video.
+
+    Returns (drop_pairs, report). The report feeds the header and `params`,
     so nothing disappears quietly.
     """
     n = len(frame_lines)
@@ -374,27 +384,45 @@ def furniture_texts(frame_lines, fps):
 
     drop = set()
     worst = None
+    kept_runs = 0
     for k, i, j in runs:
         if j - i + 1 <= floor:
             continue
-        drop.update(t for t in seq[k][i:j + 1] if t)
+        for f in range(i, j + 1):
+            if seq[k][f]:
+                drop.add((k, f))
+        kept_runs += 1
         if worst is None or (j - i + 1) > worst["run"]:
             worst = {"run": j - i + 1, "slot": k, "frame": i}
     # Never return "everything is furniture": that would empty the transcript.
-    on_screen = {t for texts in seq.values() for t in texts if t}
-    if not drop or not (on_screen - drop):
+    total_lines = sum(1 for lines in frame_lines for g in lines
+                      if norm_key(g["text"]))
+    if not drop or len(drop) >= total_lines:
         return set(), {}
 
+    dropped_texts = {seq[k][f] for k, f in drop}
     sample = ""
     for g in frame_lines[worst["frame"]]:
         if g["key"] == worst["slot"]:
             sample = g["text"]
             break
-    report = {"texts": len(drop), "slots": len(stats),
+    report = {"texts": len(dropped_texts), "slots": len(stats),
+              "runs": kept_runs, "occurrences": len(drop),
               "run_frames": worst["run"],
               "run_seconds": round(worst["run"] / max(fps, 0.01), 1),
               "sample": sample}
     return drop, report
+
+
+def prune_furniture(lines, frame_idx, drop_pairs):
+    """Remove only the line occurrences that furniture_texts() marked.
+
+    Kept as a separate pure function so the "same words later in the video"
+    regression can be tested without ffmpeg, images or an OCR engine.
+    """
+    if not drop_pairs:
+        return lines
+    return [g for g in lines if (g["key"], frame_idx) not in drop_pairs]
 
 
 def calibrate(samples, height_of):
@@ -574,7 +602,7 @@ def build_md(tag, meta, segs, stats):
             % (meta["source_label"], meta["duration"], len(segs), meta["chars"]),
             "- 这是从**画面像素**里认出来的字，不是语音识别结果：字幕可能被作者"
             "随手写错、可能与口播不一致、也可能只是标题或水印。\n",
-            "- 采样 %.1f fps，共 %d 帧；字幕带 y=%.3f–%.3f，命中 %d 帧（%.0f%%）。\n"
+            "- 采样 %g fps，共 %d 帧；字幕带 y=%.3f–%.3f，命中 %d 帧（%.0f%%）。\n"
             % (meta["fps"], meta["frames"], meta["band"][0], meta["band"][1],
                meta["hits"], meta["hits"] / max(meta["frames"], 1) * 100)]
     if meta["low_conf"]:
@@ -586,10 +614,19 @@ def build_md(tag, meta, segs, stats):
                     % (meta.get("language") or "目标语言", meta["translations"]))
     if meta.get("furniture"):
         f = meta["furniture"]
-        head.append("- 字幕带里另有固定文案（最长的一段连续 %d 帧、约 %.0f 秒一字不变，"
-                    "例如「%s」），已剔除 %d 段，未计入正文。\n"
+        head.append("- 字幕带里另有固定文案（最长的一段连续 %d 帧、约 %.0f 秒几乎不变，"
+                    "例如「%s」），已剔除 %d 段停留 / %d 处出现（涉及 %d 种文字），"
+                    "未计入正文；剔除的是这几段停留，同样的话在别的时间点"
+                    "作为字幕出现仍会保留。\n"
                     % (f["run_frames"], f["run_seconds"], f.get("sample") or "",
-                       f["texts"]))
+                       f.get("runs", f["texts"]), f.get("occurrences", 0), f["texts"]))
+    if meta.get("low_coverage"):
+        head.append("- **低覆盖率模式**：本片 %.1f 分钟，实际只采样 %.3f fps"
+                    "（约每 %.1f 秒看一帧）。正常对白字幕 2–3 秒就换一句，"
+                    "这份稿子**必然漏句，不能当完整字幕稿**。要完整提取，"
+                    "请先按时长切成多段分别跑，再人工接起来（见 README「长视频与采样上限」）。\n"
+                    % (meta["duration"] / 60.0, meta["fps"],
+                       1.0 / max(meta["fps"], 0.001)))
     if meta["duration"] and stats["coverage"] is not None and stats["coverage"] < 0.5:
         head.append("- 只覆盖了 %.0f%% 的时长：中间可能没有字幕，也可能漏读了。\n"
                     % (stats["coverage"] * 100))
@@ -632,18 +669,39 @@ def collect(inputs, recursive):
     return out
 
 
+def sampling_plan(duration, fps, max_frames):
+    """Resolve (fps, low_coverage, note) under the hard frame cap.
+
+    MAX_FRAMES protects runtime, not completeness. A 158-minute film becomes
+    0.095 fps (one frame every 10.5 s) while dialogue cues change every 2-3 s,
+    so a full-length OCR run is a *sample*, not a subtitle transcript. The
+    flag travels into params, the MD header and the console so a finished run
+    can never be mistaken for full coverage. Splitting is left to the user:
+    auto-splitting would change one-input/one-output and need cue de-duplication
+    and timeline joining, which is a feature, not a warning.
+    """
+    note = ""
+    if duration > 0 and duration * fps > max_frames:
+        fps = max_frames / float(duration)
+        note = ("sampling reduced to %.2f fps to stay under %d frames"
+                % (fps, max_frames))
+    low = fps <= LOW_FPS
+    if low:
+        extra = ("LOW COVERAGE: %.3f fps = one frame every %.1f s; this is a "
+                 "sample, not a complete subtitle transcript - split long "
+                 "videos into segments" % (fps, 1.0 / max(fps, 0.001)))
+        note = (note + "; " if note else "") + extra
+    return fps, low, note
+
+
 def read_video(path, engine, cfg, progress=None):
     """Sample, calibrate, then read every sample inside the band."""
     info = probe_media(path, cfg["ffprobe"], cfg["timeout"])
     duration = info["duration"]
     if duration <= 0:
         return {"error": "cannot read duration"}
-    fps = cfg["fps"]
-    note = ""
-    if duration * fps > cfg["max_frames"]:
-        fps = cfg["max_frames"] / duration
-        note = ("sampling reduced to %.2f fps to stay under %d frames"
-                % (fps, cfg["max_frames"]))
+    fps, low_coverage, note = sampling_plan(duration, cfg["fps"],
+                                            cfg["max_frames"])
     tmp = tempfile.mkdtemp(prefix="ocr-subs-")
     try:
         frames = extract_frames(path, tmp, fps, cfg["ffmpeg"], cfg["timeout"])
@@ -721,8 +779,7 @@ def read_video(path, engine, cfg, progress=None):
         drop, furn = furniture_texts(per_frame, fps) if bucket else (set(), {})
         translations = 0
         for idx, lines in enumerate(per_frame):
-            if drop:
-                lines = [g for g in lines if norm_key(g["text"]) not in drop]
+            lines = prune_furniture(lines, idx, drop)
             kept, rest = pick_lines(lines, cfg["language"])
             translations += len(rest)
             scores = sorted(g["conf"] for g in kept)
@@ -733,6 +790,7 @@ def read_video(path, engine, cfg, progress=None):
         return {"segments": segs, "duration": duration, "duration_source": "container",
                 "band": band, "band_used": [round(top, 4), round(bot, 4)],
                 "wide_crop": bool(band and band.get("stacked")),
+                "low_coverage": low_coverage,
                 "frames": len(frames), "fps": round(fps, 3), "note": note,
                 "hits": sum(1 for r in readings if r[1]), "info": info,
                 "furniture": furn, "translations": translations}
@@ -793,6 +851,7 @@ def process_one(path, engine, opts):
     meta = {"source_label": label, "duration": duration, "chars": len(body),
             "fps": got["fps"], "frames": got["frames"],
             "band": got["band_used"], "hits": got["hits"], "low_conf": low,
+            "low_coverage": got.get("low_coverage", False),
             "furniture": got.get("furniture") or {},
             "translations": got.get("translations", 0),
             "language": opts["language"]}
@@ -807,6 +866,8 @@ def process_one(path, engine, opts):
                    "frames": got["frames"], "sample_width": SAMPLE_W,
                    "region": list(opts["region"]), "band": got["band_used"],
                    "wide_crop": got.get("wide_crop", False),
+                   "low_coverage": got.get("low_coverage", False),
+                   "sampling_interval_s": round(1.0 / max(got["fps"], 0.001), 2),
                    "min_score": opts["min_score"], "note": got["note"],
                    "furniture": got.get("furniture") or {},
                    "translations_dropped": got.get("translations", 0)},
@@ -816,7 +877,8 @@ def process_one(path, engine, opts):
     os.makedirs(os.path.dirname(os.path.abspath(out_json)), exist_ok=True)
     write_pair(out_json, data, out_md, build_md(key, meta, segs, stats))
     rec.update({"status": "ok", "segments": len(segs), "chars": len(body),
-                "band": got["band_used"], "reason": got["note"]})
+                "band": got["band_used"], "reason": got["note"],
+                "low_coverage": got.get("low_coverage", False)})
     return rec
 
 
@@ -982,9 +1044,10 @@ def main():
             name = name[:31] + "..."
         if rec["status"] == "ok":
             band = rec["band"] or [0, 0]
-            print("[%*d/%d] ok       %-34s %3d cues / %5d chars  band %.3f-%.3f"
+            mark = "  [LOW COVERAGE]" if rec.get("low_coverage") else ""
+            print("[%*d/%d] ok       %-34s %3d cues / %5d chars  band %.3f-%.3f%s"
                   % (len(str(total)), idx, total, name, rec["segments"],
-                     rec["chars"], band[0], band[1]))
+                     rec["chars"], band[0], band[1], mark))
         elif rec["status"] == "skipped":
             print("[%*d/%d] skipped  %-34s %s"
                   % (len(str(total)), idx, total, name, rec["reason"]))
@@ -998,6 +1061,11 @@ def main():
     print("")
     print("done: %d read, %d skipped, %d without a readable subtitle band"
           % (ok, skipped, bad))
+    low = sum(1 for r in records if r["status"] == "ok" and r.get("low_coverage"))
+    if low:
+        print("WARNING: %d file(s) ran in LOW COVERAGE mode (sampling slower "
+              "than %.1f fps). They are samples, not complete subtitle "
+              "transcripts; split long videos into segments." % (low, LOW_FPS))
     if bad:
         print("next: those clips either have no burned-in subtitles or put them "
               "outside the lower half; transcribe the audio instead.")

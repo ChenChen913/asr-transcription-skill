@@ -6,11 +6,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1485%20offline%20assertions-brightgreen.svg" alt="1485 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1551%20offline%20assertions-brightgreen.svg" alt="1551 offline assertions">
   <a href="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml"><img src="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
 </p>
 
-给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1485 条离线断言。
+给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1551 条离线断言。
 
 > [!NOTE]
 > 本仓库由 AI 辅助开发，脚本与数字都经人工实测复核，过程记录在 [`ROADMAP.md`](ROADMAP.md)。未验证的平台不写成「已支持」，见[已知限制](#已知限制)。
@@ -498,7 +498,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # 串行批处理
 │   ├── qc_check.py           # 输入校验 + 四项粗筛 + 三查
 │   └── check_env.py          # 只读环境自检
-├── tests/                    # 六套零依赖测试，共 1485 条断言
+├── tests/                    # 六套零依赖测试，共 1551 条断言
 └── docs/
     ├── 转写经验_通用版.md      # 未拆分的完整原文；与 references 冲突时以 references 为准
     ├── 字幕识别与OCR_调研与设计.md  # 三条通路与实测数据；字幕轨 → v0.6，硬字幕 → v0.7
@@ -604,12 +604,37 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 - **听和看必须是同一种文字才能互校**。英文原声配中文字幕时（《至暗时刻》听的一方 4% 汉字、看的一方 96%），98 段里 0 段一致、中位相似度 0.000。`merge_sources.py` 现在直接说明"两路不是同一种文字"，并提示各自单独使用，而不是误导成"可能不是同一个文件"。
 - **双行字幕必须放宽裁剪，代价是时间**。中英双语、或一句话折成两行时，若按字幕带窄裁剪，PP-OCR 会把两行并成一个框读出乱码；改为按整块下半幅检测后才能分开，再由 `--language` 剔除译文（《纵横四海》剔 136 行、《至暗时刻》剔 342 行，错字"这黑每幅画都过于万"变回"这里每幅画都过千万"）。同一条 10 分钟片段由 27 秒变成约 4.5 分钟；单行字幕不走这条路，速度不变。
 - **纪录片画面里的字卡会混进 OCR 稿**。《人间世》10 分钟里 OCR 比听写多出 46% 的字（1340 vs 916），同语言互校中位相似度只有 0.667（短访谈约 0.90）；互校上限由"看"的质量决定。
-- **互校只对齐，不裁决**。`merge_sources.py` 给出"哪几段两边不一致"，谁对谁错要回到音频和画面判断。它不产出合并稿，也不自动改任何一边。
+- **互校只对齐，不裁决**。`merge_sources.py` 给出"哪几段两边不一致"，谁对谁错要回到音频和画面判断。它不产出合并稿，也不自动改任何一边。输入时间轴无效（负起点、`end < start`、乱序、非有限数值）时**直接拒绝并提示先跑质检**，不再像以前那样用 `max(e, s)` 夹一下、排个序就当没事；轻微重叠仍允许，因为质检里那是 review 而非 error。
+- **固定文案剔除的是"那一段停留"，不是"那句话"**。旧实现把所有相同文字的出现全部删掉，一张停 15 秒的要点条会让后面人物说出的同一句话一起消失（已用改动前后两版代码复现）。现在只删被判定为长停留的 `(槽位, 帧)`。**代价**：散落在相邻槽位、每次只停 1 帧的要点条（如 `new2/14` 的 `亮点6/7`）会重新残留，实测该条由 1031 字变成 1100 字。这是纯像素法分不开的边界，不为了盖住它把过宽的规则加回来；多留可见文字好过静默删掉真台词。
+- **长片 OCR 是抽样，不是完整字幕稿**。`--max-frames 900` 会让 158 分钟降到 0.095 fps，见[长视频与采样上限](#长视频与采样上限)；低于 0.5 fps 时产物、MD 头部和控制台都会明确标记。
 - **单文件失败不落盘**。直接调 `transcribe.py` 失败时没有产物，只能靠退出码判断。批量场景已覆盖（`_batch/summary.json` 记退出码与错误尾部），单文件场景仍是 `ROADMAP.md` 的 C4。
 - **不报准确率**。没有人工标准答案就不报，这是硬规则，不是谦虚。
 - **SenseVoice 只当第二意见**。它输出没有可用时间戳，中英混读的专名明显弱于主力，不能单独出正式稿。
 - **模型要自己下**。仓库不含权重、不含音频、不含任何凭据。
 - **没有目录级汇总报表**。`_batch/summary.json` 是逐文件结果，不做跨目录统计。
+
+### 长视频与采样上限
+
+`ocr_subs.py` 默认 1 fps，且有 **900 帧硬上限**（防止长片把运行时间拖到不可控）。超过上限会自动降频：
+
+| 片长 | 实际采样 | 一帧间隔 | 判定 |
+|---|---|---|---|
+| 10 分钟 | 1 fps | 1 s | 正常 |
+| 30 分钟 | 0.5 fps | 2 s | **低覆盖率** |
+| 60 分钟 | 0.25 fps | 4 s | **低覆盖率** |
+| 158 分钟 | 0.095 fps | 10.5 s | **低覆盖率** |
+
+正常对白字幕 2–3 秒就换一句，**0.5 fps 以下必然漏句**。所以"跑完了"不等于"字幕读全了"：低于阈值时，产物 `params.low_coverage`、MD 头部和控制台都会明确标出，这份稿子只能当抽样，不能当完整字幕稿。
+
+要完整提取，先切片再分别跑：
+
+```bash
+ffmpeg -v error -ss 0    -t 900 -i "电影.mp4" -c copy p1.mp4
+ffmpeg -v error -ss 900  -t 900 -i "电影.mp4" -c copy p2.mp4
+python scripts/ocr_subs.py --input p1.mp4 p2.mp4 --out-dir out --language zh
+```
+
+每段的 JSON 时间轴都从 0 开始，拼接时要把后一段的时间戳加上该段起点秒数；`-ss` 放在 `-i` 前靠关键帧定位，可能有 1–2 秒偏差。切得短一点（每段 ≤ 15 分钟）就能保持 1 fps。900 帧上限是运行时间保护，不是完整性保证，这条边界写进产物而不是藏在代码里。
 
 ### 性能数字的边界
 

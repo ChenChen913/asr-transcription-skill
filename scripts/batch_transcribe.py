@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import time
+import wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRANSCRIBE = os.path.join(HERE, "transcribe.py")
@@ -224,7 +225,7 @@ def md_for(json_path):
 
 
 def stage_aside(json_path):
-    """Move the existing output pair to .prev before a re-run.
+    """Move the existing output pair to .prev; return an error string or None.
 
     Two failure modes this prevents:
 
@@ -234,13 +235,32 @@ def stage_aside(json_path):
          normal path - and the .md is the file a human actually reads. After a
          failed re-run the folder would show a believable transcript with no
          JSON beside it, which looks like a successful result.
+
+    A half-staged pair is worse than no staging at all, so a failure on the
+    second file rolls the first one back. Both halves are reported: silently
+    swallowing an OSError here used to let a re-run overwrite the old .md with
+    no backup, losing the previous transcript while claiming success.
     """
+    moved = []
     for path in (json_path, md_for(json_path)):
+        if not os.path.exists(path):
+            continue
         try:
-            if os.path.exists(path):
-                os.replace(path, path + ".prev")
-        except OSError:
-            pass
+            os.replace(path, path + ".prev")
+        except OSError as exc:
+            failed_rollback = []
+            for done in reversed(moved):
+                try:
+                    os.replace(done + ".prev", done)
+                except OSError as back:
+                    failed_rollback.append("%s (%s)" % (done, back))
+            msg = "could not stage %s aside: %s" % (path, exc)
+            if failed_rollback:
+                msg += "; ROLLBACK FAILED, restore manually: " + ", ".join(
+                    failed_rollback)
+            return msg
+        moved.append(path)
+    return None
 
 
 def drop_prev(json_path):
@@ -266,7 +286,10 @@ def run_one(src, out_json, key, opts):
     if err:
         rec["error"] = err
         return rec
-    stage_aside(out_json)
+    stage_error = stage_aside(out_json)
+    if stage_error:
+        rec["error"] = stage_error
+        return rec
     cmd = build_cmd(opts["python"], opts["script"], wav, out_json, key, opts)
     started = time.time()
     try:
@@ -323,12 +346,53 @@ def audio_cache_path(out_dir, key):
     return os.path.join(out_dir, SUMMARY_DIR, "audio", key + ".wav")
 
 
+def wav_ok(path):
+    """Return a reason why a decoded WAV is unusable, or None when it is sound.
+
+    `os.path.getsize(dst) > 44` only proves that ffmpeg wrote *something*. A
+    timeout or a killed decode leaves a multi-megabyte WAV with a plausible
+    header and a truncated data chunk; the next run used to accept it as a
+    valid cache and transcribe silence forever.
+
+    Checks the format we asked ffmpeg for, then seeks to the last declared
+    frame and reads it. `readframes()` returns short when the file ends before
+    the header says it should, which is exactly the truncated-cache case. We
+    deliberately do not compare against the source container's duration: that
+    needs ffprobe, is unreliable for some containers, and would add a tolerance
+    knob for no extra certainty about *this* file's integrity.
+    """
+    try:
+        with wave.open(path, "rb") as w:
+            if w.getnchannels() != 1:
+                return "%d channels, expected 1" % w.getnchannels()
+            if w.getsampwidth() != 2:
+                return "%d-byte samples, expected 2" % w.getsampwidth()
+            if w.getframerate() != 16000:
+                return "%d Hz, expected 16000" % w.getframerate()
+            frames = w.getnframes()
+            if frames <= 0:
+                return "no audio frames"
+            w.setpos(frames - 1)
+            frame_bytes = w.getnchannels() * w.getsampwidth()
+            if len(w.readframes(1)) != frame_bytes:
+                return "truncated data chunk (header claims %d frames)" % frames
+    except (wave.Error, EOFError, OSError, ValueError) as exc:
+        return "unreadable WAV: %s" % exc
+    return None
+
+
 def extract_audio(src, key, out_dir, timeout, force=False):
     """Return (wav_path, error). A WAV input is returned untouched.
 
     The decoded copy is cached under <out-dir>/_batch/audio and reused, so a
     retry after a failed transcription does not pay for ffmpeg again. --force
     re-decodes, because the source may have been replaced between runs.
+
+    ffmpeg only ever writes to a .part temporary file. It is validated and
+    atomically renamed into place on success, and removed on every failure
+    path - including a timeout, where ffmpeg has usually already written a
+    large, unusable file. A corrupt pre-existing cache is re-decoded rather
+    than reused.
 
     ffmpeg is only needed when a non-WAV actually appears: a batch of WAV files
     still runs on a machine with no ffmpeg at all (the six test suites rely on
@@ -337,29 +401,46 @@ def extract_audio(src, key, out_dir, timeout, force=False):
     if not needs_extract(src):
         return src, None
     dst = audio_cache_path(out_dir, key)
-    if not force and os.path.exists(dst) and os.path.getsize(dst) > 44:
+    if not force and os.path.exists(dst) and wav_ok(dst) is None:
         return dst, None
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    # Keep the .wav suffix: ffmpeg picks the output format from the filename,
+    # and writing to "05.wav.part-1234" made it fail with "Unable to find a
+    # suitable output format" before any audio was decoded. -f wav makes the
+    # intent explicit as well.
+    part = "%s.part-%d.wav" % (os.path.splitext(dst)[0], os.getpid())
     cmd = [FFMPEG, "-v", "error", "-y", "-i", src, "-vn",
-           "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", dst]
+           "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", part]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except FileNotFoundError:
-        return None, ("ffmpeg not found on PATH - it is needed to decode %s. "
-                      "Install ffmpeg, or convert to 16 kHz mono WAV first."
-                      % os.path.basename(src))
-    except subprocess.TimeoutExpired:
-        return None, ("ffmpeg timed out after %ss on %s"
-                      % (timeout, os.path.basename(src)))
-    except Exception as exc:
-        return None, "could not run ffmpeg: %s" % exc
-    if proc.returncode != 0:
-        msg = proc.stderr.decode("utf-8", "replace").strip()
-        return None, "ffmpeg failed (%d) on %s: %s" % (
-            proc.returncode, os.path.basename(src), tail(msg, 400))
-    if not os.path.exists(dst) or os.path.getsize(dst) <= 44:
-        return None, "ffmpeg produced no audio for %s" % os.path.basename(src)
-    return dst, None
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        except FileNotFoundError:
+            return None, ("ffmpeg not found on PATH - it is needed to decode %s. "
+                          "Install ffmpeg, or convert to 16 kHz mono WAV first."
+                          % os.path.basename(src))
+        except subprocess.TimeoutExpired:
+            return None, ("ffmpeg timed out after %ss on %s"
+                          % (timeout, os.path.basename(src)))
+        except Exception as exc:
+            return None, "could not run ffmpeg: %s" % exc
+        if proc.returncode != 0:
+            msg = proc.stderr.decode("utf-8", "replace").strip()
+            return None, "ffmpeg failed (%d) on %s: %s" % (
+                proc.returncode, os.path.basename(src), tail(msg, 400))
+        why = wav_ok(part)
+        if why:
+            return None, ("ffmpeg produced an incomplete WAV for %s: %s"
+                          % (os.path.basename(src), why))
+        os.replace(part, dst)
+        part = None
+        return dst, None
+    finally:
+        if part:
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except OSError:
+                pass
 
 
 def planned_extract(items):

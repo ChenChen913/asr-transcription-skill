@@ -23,6 +23,7 @@ that judgement cheap.
 """
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -119,24 +120,66 @@ def covered(a, b):
     return hit / float(len(short))
 
 
+def validate_timeline(items):
+    """Return a readable reason to reject this timeline, or None.
+
+    qc_check.py established the rule for this project: timestamps that *parse*
+    are not necessarily a valid timeline. merge_sources used to repair them
+    quietly - `max(e, s)` clamped a backwards segment and `sort()` reordered
+    out-of-order input - so a broken file produced a confident-looking report.
+    Neither is done here any more: a report built on a repaired timeline is
+    not evidence about the original files.
+
+    Overlaps are allowed. They are a REVIEW in qc_check (subtitle tracks do
+    overlap), and alignment already has best_lag() for genuine offsets. Only
+    conditions qc_check calls an ERROR are refused here.
+    """
+    def number(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    prev_s = None
+    for i, x in enumerate(items):
+        if not isinstance(x, dict):
+            return "segment[%d] is not an object" % i
+        s, e = x.get("s"), x.get("e")
+        if not number(s) or not number(e):
+            return "segment[%d] has a missing or non-numeric s/e" % i
+        s, e = float(s), float(e)
+        if not (math.isfinite(s) and math.isfinite(e)):
+            return "segment[%d] has a non-finite timestamp" % i
+        if s < 0:
+            return "segment[%d] start < 0 (%.2f)" % (i, s)
+        if e < s:
+            return "segment[%d] end < start (%.2f < %.2f)" % (i, e, s)
+        if prev_s is not None and s < prev_s - 0.001:
+            return ("segments out of order at index %d (%.2f < %.2f)"
+                    % (i, s, prev_s))
+        prev_s = s
+    return None
+
+
 def load(path, side):
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
     segs = data.get("segments")
     if not isinstance(segs, list) or not segs:
         raise SystemExit("[ERROR] %s has no usable segments" % path)
+    problem = validate_timeline(segs)
+    if problem:
+        raise SystemExit(
+            "[ERROR] %s has an invalid timeline: %s\n"
+            "  Run: python scripts/qc_check.py \"%s\"\n"
+            "  merge_sources does not clamp, reorder or otherwise repair "
+            "timestamps; fix the source first." % (path, problem, path))
     clean = []
     for x in segs:
-        try:
-            s, e = float(x["s"]), float(x["e"])
-            t = str(x.get("t") or x.get("text") or "").strip()
-        except (KeyError, TypeError, ValueError):
-            continue
+        t = str(x.get("t") or x.get("text") or "").strip()
         if t:
-            clean.append({"s": s, "e": max(e, s), "t": t})
+            # Keep the values as read. Sorting here used to hide out-of-order
+            # input instead of reporting it.
+            clean.append({"s": float(x["s"]), "e": float(x["e"]), "t": t})
     if not clean:
-        raise SystemExit("[ERROR] %s has no segment with s/e/t" % path)
-    clean.sort(key=lambda x: x["s"])
+        raise SystemExit("[ERROR] %s has no segment with text" % path)
     try:
         dur = float(data.get("duration") or 0)
     except (TypeError, ValueError):

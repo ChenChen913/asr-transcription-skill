@@ -119,24 +119,35 @@ def case_pick_lines():
 
 def case_furniture():
     def seq(slots, n):
-        """n frames; slots maps a y-slot to the text it carries each frame."""
+        """n frames; slots maps a y-slot to the text it carries each frame.
+        None means the slot is absent in that frame (no OCR box at all)."""
         out = []
         for i in range(n):
-            out.append([{"key": k, "text": v(i) if callable(v) else v, "conf": 0.9}
-                        for k, v in slots.items()])
+            row = []
+            for k, v in slots.items():
+                t = v(i) if callable(v) else v
+                if t is None:
+                    continue
+                row.append({"key": k, "text": t, "conf": 0.9})
+            out.append(row)
         return out
 
     # Dialogue changes every second; the bullet block under it does not.
-    frames = seq({40: lambda i: "第%d句口播" % i, 44: "亮点1：项目来自真正的业务场景"}, 12)
+    card = "亮点1：项目来自真正的业务场景"
+    frames = seq({40: lambda i: "第%d句口播" % i, 44: card}, 12)
     drop, report = ocr.furniture_texts(frames, 1.0)
-    eq(drop, {ocr.norm_key("亮点1：项目来自真正的业务场景")}, "the held line is dropped")
-    ok(not any(ocr.norm_key("第%d句口播" % i) in drop for i in range(12)),
+    eq(drop, {(44, f) for f in range(12)}, "the held run is dropped by frame+slot")
+    ok(not any((40, f) in drop for f in range(12)),
        "the changing line survives")
     eq(report["run_frames"], 12, "and its run length is reported")
+    eq(report["texts"], 1, "the report still counts distinct dropped texts")
+    eq(report["runs"], 1, "and how many runs were pruned")
+    eq(report["occurrences"], 12, "and how many (slot, frame) occurrences")
 
     # Spacing inside the block is OCR noise, not a change.
-    frames = seq({40: lambda i: "第%d句" % i, 44: lambda i: "亮点 1" if i % 2 else "亮点1"}, 12)
-    eq(ocr.furniture_texts(frames, 1.0)[0], {"亮点1"},
+    frames = seq({40: lambda i: "第%d句" % i,
+                  44: lambda i: "亮点 1" if i % 2 else "亮点1"}, 12)
+    eq(ocr.furniture_texts(frames, 1.0)[0], {(44, f) for f in range(12)},
        "spacing and case do not break a run")
 
     # The head of a slot can be reused: long-held chapter cards, with a real
@@ -144,9 +155,28 @@ def case_furniture():
     script = ["章节点"] * 8 + ["发票要寄到上海办公室"] * 2 + ["章节点"] * 8
     frames = seq({40: lambda i: "第%d句" % i, 44: lambda i: script[i]}, len(script))
     drop, _ = ocr.furniture_texts(frames, 1.0)
-    eq(drop, {ocr.norm_key("章节点")}, "the long run is dropped")
-    ok(ocr.norm_key("发票要寄到上海办公室") not in drop,
+    ok((44, 0) in drop and (44, 17) in drop, "the long runs are dropped")
+    ok((44, 8) not in drop and (44, 9) not in drop,
        "a short line sharing the same slot survives")
+    eq(ocr.prune_furniture(frames[8], 8, drop), frames[8],
+       "prune leaves that frame untouched")
+
+    # Regression for the review finding: the SAME words are first a held card
+    # and later a real, short-lived subtitle. Filtering by text used to delete
+    # both. Only the frames of the held run may go.
+    script = [card] * 12 + [None] * 4 + [card] * 2
+    frames = seq({40: lambda i: "第%d句口播" % i, 44: lambda i: script[i]},
+                 len(script))
+    drop, _ = ocr.furniture_texts(frames, 1.0)
+    ok((44, 0) in drop, "the held card is still dropped")
+    ok((44, 16) not in drop and (44, 17) not in drop,
+       "the same sentence spoken later is not marked for deletion")
+    later = ocr.prune_furniture(frames[16], 16, drop)
+    eq([g["text"] for g in later], [frames[16][0]["text"], card],
+       "prune keeps the later subtitle in the actual frame")
+    eq([g["text"] for g in ocr.prune_furniture(frames[0], 0, drop)],
+       [frames[0][0]["text"]],
+       "and removes the card from the frame that held it")
 
     # A clip where everything is held: no fast line to compare against, so
     # nothing is removed. Silence is not evidence of furniture.
@@ -162,6 +192,8 @@ def case_furniture():
 
     eq(ocr.furniture_texts(seq({40: "只有一行"}, 12), 1.0), (set(), {}),
        "a single slot is never furniture")
+    eq(ocr.prune_furniture(frames[0], 0, set()), frames[0],
+       "an empty drop set is a no-op")
 
 
 def case_reading_of():
@@ -349,6 +381,34 @@ def case_segments_skip_empty():
 
 # ------------------------------------------------------------------ output ---
 
+def case_sampling_plan():
+    f, low, note = ocr.sampling_plan(600, 1.0, 900)
+    close(f, 1.0, 0.001, "10 min keeps the requested 1 fps")
+    eq(low, False, "10 min is full coverage")
+    eq(note, "", "no note when no reduction is needed")
+
+    f, low, _ = ocr.sampling_plan(1800, 1.0, 900)
+    close(f, 0.5, 0.001, "30 min is reduced to 0.5 fps")
+    eq(low, True, "30 min is flagged: a 2 s gap misses 2-3 s cues")
+
+    f, low, _ = ocr.sampling_plan(3600, 1.0, 900)
+    close(f, 0.25, 0.001, "60 min is reduced to 0.25 fps")
+    eq(low, True, "60 min is flagged")
+
+    f, low, note = ocr.sampling_plan(9512, 1.0, 900)
+    ok(f < 0.1, "158 min is reduced below 0.1 fps")
+    eq(low, True, "158 min is flagged")
+    ok("LOW COVERAGE" in note and "split long videos" in note,
+       "the note says the result is incomplete and what to do")
+
+    f, low, _ = ocr.sampling_plan(600, 0.05, 900)
+    close(f, 0.05, 0.001, "an explicitly low --fps is honoured")
+    eq(low, True, "and still flagged even without the frame cap")
+
+    f, low, _ = ocr.sampling_plan(0, 1.0, 900)
+    close(f, 1.0, 0.001, "unknown duration does not divide by zero")
+
+
 def case_md():
     meta = {"source_label": "画面硬字幕（OCR 逐帧识别）", "duration": 10.0,
             "chars": 6, "fps": 1.0, "frames": 10, "band": [0.72, 0.78],
@@ -361,6 +421,15 @@ def case_md():
     ok("9 帧（90%）" in text, "header reports band hits")
     ok("可疑一句  [?]" in text, "low-confidence cue is marked")
     ok("正常一句  [?]" not in text, "confident cue is not marked")
+    ok("低覆盖率" not in text, "full coverage prints no warning")
+
+    meta["low_coverage"] = True
+    meta["fps"] = 0.095
+    meta["duration"] = 9512.0
+    text = "".join(ocr.build_md("t", meta, segs, stats))
+    ok("低覆盖率模式" in text, "low coverage is called out in the artefact")
+    ok("不能当完整字幕稿" in text, "the header says it is not a complete transcript")
+    ok("切成多段" in text, "the header points at the remedy")
 
 
 def main():
@@ -370,6 +439,7 @@ def main():
     case_lines_of()
     case_pick_lines()
     case_furniture()
+    case_sampling_plan()
     case_reading_of()
     case_band_static_rejected()
     case_band_no_text()

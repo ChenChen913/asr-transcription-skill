@@ -83,7 +83,7 @@ python scripts/batch_transcribe.py --input "素材A" --out-dir "out" --model "<�
 python scripts/qc_check.py "out/*.json"        # 摘要不在 out/ 根下，不会被误报
 ```
 
-> 默认收 WAV 与常见视频/音频容器（`.mp4 .mov .mkv .m4a .mp3 .flac` 等）。**非 WAV 会先用 ffmpeg 解成 16 kHz 单声道**，缓存在 `<out-dir>/_batch/audio/`，重跑复用、`--force` 才重抽；纯 WAV 批次完全不调用 ffmpeg。匹配到非 WAV 而 PATH 里没有 ffmpeg 时，开跑**之前**就以退出码 2 停下，不会逐个文件失败。子目录要 `--recursive`。重跑同一条命令只重试失败项；`--timeout` 默认 1800 s/文件，也用于单次 ffmpeg 解码。
+> 默认收 WAV 与常见视频/音频容器（`.mp4 .mov .mkv .m4a .mp3 .flac` 等）。**非 WAV 会先用 ffmpeg 解成 16 kHz 单声道**，缓存在 `<out-dir>/_batch/audio/`，重跑复用、`--force` 才重抽；缓存不是"文件大于 44 字节就信"——先写 `.part-<pid>.wav`，用 `wave` 校验 16 kHz / 单声道 / 16 bit / 末尾一帧可读，通过才原子替换，失败与超时都清理临时文件，残缺缓存会触发重解码。纯 WAV 批次完全不调用 ffmpeg。匹配到非 WAV 而 PATH 里没有 ffmpeg 时，开跑**之前**就以退出码 2 停下，不会逐个文件失败。子目录要 `--recursive`。重跑同一条命令只重试失败项；`--timeout` 默认 1800 s/文件，也用于单次 ffmpeg 解码。
 >
 > 每个输入产出的是**一组成套产物**：`<key>.json` + `<key>.md`。跳过判据是这一组都完整（JSON 可解析且含 `segments`/`duration`，MD 存在且非空），所以中途被 Ctrl-C / 断电打断、只留下 JSON 的文件，下一轮会自动补跑，不会被当成「已完成」。
 

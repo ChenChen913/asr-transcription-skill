@@ -6,11 +6,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1485%20offline%20assertions-brightgreen.svg" alt="1485 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1551%20offline%20assertions-brightgreen.svg" alt="1551 offline assertions">
   <a href="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml"><img src="https://github.com/ChenChen913/asr-transcription-skill/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
 </p>
 
-An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1485 offline assertions.
+An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1551 offline assertions.
 
 > [!NOTE]
 > This repository is AI-assisted. Every script and number has been verified by hand, and the process is recorded in [`ROADMAP.md`](ROADMAP.md). Platforms that were not tested are never described as supported — see [Known limitations](#known-limitations).
@@ -496,7 +496,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # serial batch runner
 │   ├── qc_check.py           # validation + four coarse metrics + three checks
 │   └── check_env.py          # read-only environment check
-├── tests/                    # six zero-dependency suites, 1485 assertions
+├── tests/                    # six zero-dependency suites, 1551 assertions
 └── docs/
     ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
     ├── 字幕识别与OCR_调研与设计.md  # three routes and measurements; the track part shipped as v0.6
@@ -602,11 +602,37 @@ A: Yes, through `batch_transcribe.py`: non-WAV matches are decoded to 16 kHz mon
 - **Cross-checking requires the same script on both sides.** With English audio and Chinese subtitles (heard 4% CJK, seen 96%), 0 of 98 pairs agreed and median similarity was 0.000. `merge_sources.py` now says plainly that the two sides use different writing systems and should each be used on their own, instead of suggesting they might be different files.
 - **Two stacked lines need a wider crop, and that costs time.** Cropping tightly to the band makes PP-OCR fuse a Chinese line and its English translation into one box and read garbage; detecting over the whole lower half separates them, after which `--language` drops the translation (136 lines in one film, 342 in the other, and "这黑每幅画都过于万" becomes "这里每幅画都过千万"). The same 10-minute clip goes from 27 s to about 4.5 minutes. Single-line subtitles keep the fast path unchanged.
 - **On-screen cards leak into documentary OCR.** Over 10 minutes of a documentary, OCR produced 46% more characters than ASR (1340 vs 916) and same-language cross-checking fell to a median 0.667 (about 0.90 on short interviews). The ceiling of cross-checking is set by the quality of "seeing".
+- **Cross-checking aligns, it does not adjudicate.** `merge_sources.py` reports where the two sides disagree; deciding which is right means going back to the audio and the picture. It produces no merged transcript and edits neither side. An invalid input timeline (negative start, `end < start`, out of order, non-finite values) is now **refused with a pointer to qc_check.py** instead of being quietly clamped by `max(e, s)` and reordered by `sort()`. Mild overlap is still allowed: qc_check calls that REVIEW, not ERROR.
+- **Furniture removal targets a run, not a string.** The old code deleted every occurrence of a held text, so a 15-second bullet card also removed the same sentence when a speaker said it later (reproduced with the before/after implementations). Only the `(slot, frame)` occurrences judged to be long holds are removed now. **Cost:** bullet fragments that land in a neighbouring slot for a single frame (`亮点6/7` in `new2/14`) leak back - that clip went from 1031 to 1100 characters. Pure pixel evidence cannot tell them from speech, and the over-wide rule is not coming back: leaving visible text is safer than silently deleting a real subtitle.
+- **Long-video OCR is a sample, not a complete subtitle transcript.** The 900-frame cap drops a 158-minute film to 0.095 fps; see [Long videos and the sampling cap](#long-videos-and-the-sampling-cap). Anything at or below 0.5 fps is flagged in the JSON, the MD header and the console.
 - **Single-file failures leave no artefact.** Calling `transcribe.py` directly on a failing input produces nothing; only the exit code tells you. Batch covers it (`_batch/summary.json` records exit code and error tail); the single-file case is still C4 in `ROADMAP.md`.
 - **No accuracy claims.** Without a human reference there is no number. That is a rule, not modesty.
 - **SenseVoice is a second opinion only.** Its output has no usable timestamps, and it is clearly weaker on mixed Chinese/English proper nouns. It cannot produce a final transcript alone.
 - **You download the models.** The repository contains no weights, no audio, and no credentials.
 - **No directory-level report.** `_batch/summary.json` is per file; there is no cross-directory rollup.
+
+### Long videos and the sampling cap
+
+`ocr_subs.py` samples at 1 fps by default and has a **hard cap of 900 frames** so a long film cannot make a run unbounded. Past the cap it lowers the rate:
+
+| Length | Actual rate | One frame every | Verdict |
+|---|---|---|---|
+| 10 min | 1 fps | 1 s | normal |
+| 30 min | 0.5 fps | 2 s | **low coverage** |
+| 60 min | 0.25 fps | 4 s | **low coverage** |
+| 158 min | 0.095 fps | 10.5 s | **low coverage** |
+
+Dialogue cues change every 2–3 s, so **anything at or below 0.5 fps necessarily misses cues**. "Finished" is not the same as "complete": below the threshold, `params.low_coverage`, the MD header and the console all say the output is a sample, not a full subtitle transcript.
+
+For complete extraction, split the video first and run each part:
+
+```bash
+ffmpeg -v error -ss 0    -t 900 -i "movie.mp4" -c copy p1.mp4
+ffmpeg -v error -ss 900  -t 900 -i "movie.mp4" -c copy p2.mp4
+python scripts/ocr_subs.py --input p1.mp4 p2.mp4 --out-dir out --language zh
+```
+
+Each part's timeline restarts at 0, so add that part's start offset when joining. `-ss` before `-i` seeks to a keyframe and can be 1–2 s off. Keep each part under 15 minutes to stay at 1 fps. The 900-frame cap protects runtime, not completeness; the boundary belongs in the artefact, not hidden in the code.
 
 ### Limits of the performance numbers
 
