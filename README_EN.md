@@ -322,7 +322,8 @@ asr-transcription/
 ├── tests/                    # three zero-dependency suites, 1028 assertions
 └── docs/
     ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
-    └── 字幕识别与OCR_调研与设计.md  # unimplemented design: three routes, measurements, red-line conflicts
+    ├── 字幕识别与OCR_调研与设计.md  # unimplemented design: three routes, measurements, red-line conflicts
+    └── 参考项目评估_native-subtitle-quote-image.md  # upstream evaluation: band detection, frame diffing
 ```
 
 Three loading levels: `name` + `description` always resident → `SKILL.md` on trigger → one `references/` file on demand. Scripts execute directly; they never need to enter the context window.

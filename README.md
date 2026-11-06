@@ -322,7 +322,8 @@ asr-transcription/
 ├── tests/                    # 三套零依赖测试，共 1028 条断言
 └── docs/
     ├── 转写经验_通用版.md      # 未拆分的完整原文；与 references 冲突时以 references 为准
-    └── 字幕识别与OCR_调研与设计.md  # 未实施的设计方案：三条通路、实测数据、红线冲突
+    ├── 字幕识别与OCR_调研与设计.md  # 未实施的设计方案：三条通路、实测数据、红线冲突
+    └── 参考项目评估_native-subtitle-quote-image.md  # 上游项目可移植技术评估（字幕带定位、帧差异度）
 ```
 
 三级加载：`name` + `description` 常驻 → 触发后读 `SKILL.md` → 只按需读一个 `references/` 文件。脚本可以直接执行，不必读进上下文。
