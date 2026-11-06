@@ -102,6 +102,8 @@ def case_normal(tmp):
     ok(INFER_SLEEP - 0.05 <= d["asr_s"] <= ASR_MAX, "normal: asr_s ~%.2f, got %s" % (INFER_SLEEP, d["asr_s"]))
     ok(abs(d["rtf_x"] - 3.0 / d["asr_s"]) < 0.05, "normal: rtf_x = duration/asr_s")
     ok(calls["load"] == ["cuda"] and calls["infer"] == 1, "normal: one attempt")
+    ok(os.path.exists(os.path.splitext(out)[0] + ".md"),
+       "normal: the md half of the deliverable is written")
 
 
 def case_gpu_load_failure(tmp):
@@ -233,6 +235,45 @@ def case_bad_wav(tmp):
     ok("Traceback" not in err, "bad_wav: no traceback")
 
 
+def case_write_pair(tmp):
+    """JSON + MD is one deliverable, and the JSON must appear last.
+
+    batch_transcribe.py decides "already done" from the pair, so a kill between
+    the two renames must never leave a JSON that looks complete next to a
+    missing transcript. Rename order is the invariant that prevents it.
+    """
+    j = os.path.join(tmp, "pair.json")
+    m = os.path.join(tmp, "pair.md")
+    calls = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        calls.append((os.path.basename(src), os.path.basename(dst)))
+        return real_replace(src, dst)
+
+    os.replace = spy
+    try:
+        tr.write_pair(j, {"duration": 1.0, "segments": []}, m, ["# t\n", "body\n"])
+    finally:
+        os.replace = real_replace
+
+    ok(os.path.exists(j) and os.path.exists(m), "pair: both files written")
+    ok(calls[0][1] == "pair.md", "pair: md renamed first, got %r" % (calls[:1],))
+    ok(calls[-1][1] == "pair.json",
+       "pair: json renamed last (json implies md), got %r" % (calls[-1:],))
+    ok(not os.path.exists(j + ".tmp") and not os.path.exists(m + ".tmp"),
+       "pair: no temp file left behind")
+    ok(open(m, encoding="utf-8").read() == "# t\nbody\n", "pair: md text intact")
+
+    # Overwriting an existing pair must not destroy the old one before the new
+    # one is on disk: same two renames, no truncation of the live files.
+    tr.write_pair(j, {"duration": 2.0, "segments": []}, m, ["# new\n"])
+    d = json.load(open(j, encoding="utf-8"))
+    ok(d["duration"] == 2.0, "pair: overwrite replaces the json")
+    ok(open(m, encoding="utf-8").read() == "# new\n",
+       "pair: overwrite replaces the md")
+
+
 def case_dll_handles():
     """The DLL directory handles must stay alive after prepare_cuda_dlls()."""
     dirs = list(tr.cuda_dll_dirs())
@@ -261,6 +302,7 @@ if __name__ == "__main__":
         case_no_fallback_flag(tmp)
         case_both_fail(tmp)
         case_bad_wav(tmp)
+        case_write_pair(tmp)
         case_dll_handles()
 
     print()

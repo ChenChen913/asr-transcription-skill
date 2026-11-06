@@ -97,10 +97,10 @@ agent_created: true
 
 ## 可执行脚本
 
-- `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD；仅当错误确属 GPU/CUDA 时才回退 CPU（模型坏、音频坏直接报错，`--no-fallback` 可禁用回退）；产物可直接喂给 qc_check。读输出里的 `device` 字段判断实际用的设备，别只看命令行入参。
+- `scripts/transcribe.py`：**真正执行转写**，输出统一 JSON + 带时间戳 MD（两份各写 `.tmp` 后原子改名，先 MD 后 JSON，所以「有 JSON ⇒ 有 MD」）；仅当错误确属 GPU/CUDA 时才回退 CPU（模型坏、音频坏直接报错，`--no-fallback` 可禁用回退）；产物可直接喂给 qc_check。读输出里的 `device` 字段判断实际用的设备，别只看命令行入参。
 - `scripts/check_env.py`：只读环境自检，输出版本、显卡、CUDA DLL 文件、磁盘、模型目录状态。
-- `scripts/batch_transcribe.py`：多目录/多模式**串行**批处理，跳过已完成、失败隔离，每文件产出与单跑同 schema 的 JSON + MD，汇总写 `_batch/summary.json`；退出码 0/1/2。**不做并发、队列、重试调度**——状态就是那些输出 JSON 本身。
+- `scripts/batch_transcribe.py`：多目录/多模式**串行**批处理，跳过已完成、失败隔离，每文件产出与单跑同 schema 的 JSON + MD，汇总写 `_batch/summary.json`；退出码 0/1/2。**不做并发、队列、重试调度**——状态就是那些输出产物本身。「已完成」要求 JSON + MD **两份都完整**；`--force` 也把两份一起挪成 `.prev`。只吃 PCM WAV：`--pattern` 只筛文件名，匹配到非 `.wav` 会在开跑前告警。
 - `scripts/qc_check.py`：输入校验（ERROR）+ 四项粗筛 + 三查硬规则（RED/REVIEW）；无真实时间戳或时间戳无效时时间类指标为 `null` 并标 N/A，duration 无效时明确报「无法检查」；`--json` 始终是严格 JSON。
-- `tests/run_smoke.py`：零依赖回归测试，33 类输入 × 文本/JSON 两种模式，883 条断言；`tests/run_transcribe_unit.py`：回退决策与耗时口径，35 条断言；`tests/run_batch_unit.py`：批处理键名/碰撞/跳过判据/摘要编码，61 条断言。都不需要网络 / 模型 / GPU。
+- `tests/run_smoke.py`：零依赖回归测试，33 类输入 × 文本/JSON 两种模式，883 条断言；`tests/run_transcribe_unit.py`：回退决策、耗时口径、产物原子写入，43 条断言；`tests/run_batch_unit.py`：批处理键名/碰撞/跳过判据/摘要编码，外加用假 `transcribe.py` 驱动的端到端集成（成功+失败+跳过+修复重试+半成品产物），102 条断言。都不需要网络 / 模型 / GPU。
 
 > 第三方项目、维护方、许可证见 `references/09-attribution.md`；本机实测配置与已验证范围见 `README.md`。换机器时先按 `references/06-environment.md` 复核，不要照抄任何数字。版本规划见 `ROADMAP.md`。

@@ -5,25 +5,31 @@
 Four properties, and deliberately nothing else (see ROADMAP C2):
 
   1. serial     - one file at a time, one model instance, no workers, no queue
-  2. skip done  - a file is done when its output JSON is readable and complete;
-                  --force ignores that
+  2. skip done  - a file is done when its output *pair* is complete: the JSON
+                  is readable and carries segments+duration, and the .md next to
+                  it exists and is not empty. --force ignores that
   3. isolation  - one bad file never stops the batch; each failure is recorded
                   with its exit code and the tail of its error
   4. per file   - each input gets its own JSON + MD, produced by
                   scripts/transcribe.py (identical schema to a single run)
 
-No database, no lock file, no retry scheduler. **The output JSON is the state**:
+No database, no lock file, no retry scheduler. **The output pair is the state**:
 one source of truth, so a half-finished batch cannot drift out of sync with a
 separate progress file.
 
 Layout of --out-dir:
 
-    <key>.json / <key>.md      one transcript per input
-    <key>.json.prev            previous version, only while a re-run is in
-                               flight or if that re-run failed (never counts as
-                               done, so a failure is retried next time)
+    <key>.json / <key>.md      one transcript per input, always as a pair
+    <key>.json.prev            previous version of the pair, only while a
+    <key>.md.prev              re-run is in flight or if that re-run failed
+                               (never counts as done, so a failure is retried
+                               next time)
     _batch/summary.json        counts + per-file outcome, rewritten after every
                                file so a killed batch still leaves a record
+
+Input is PCM WAV only: duration is measured with the stdlib `wave` module, so
+`--pattern` picks file *names*, it does not add decoders. Convert other formats
+with ffmpeg first (a warning is printed for non-.wav matches).
 
 Exit codes: 0 all ok/skipped, 1 at least one failed or timed out, 2 bad usage or
 no input matched - same spirit as qc_check.py, so a batch can gate CI.
@@ -128,8 +134,14 @@ def collect(inputs, patterns, recursive, out_dir):
 
 # -------------------------------------------------------------- done check ---
 
-def is_done(json_path):
-    """(done, reason). 'Done' means the previous output is readable and complete.
+def is_done(json_path, md_path=None):
+    """(done, reason). 'Done' means the previous pair of outputs is complete.
+
+    One task produces two files (`<key>.json` + `<key>.md`), so both count. The
+    JSON alone is not enough: if the process dies between the two writes, the
+    JSON can be perfectly valid while the transcript a human would read is
+    missing. Treating that as done would report `ok` for a half-deliverable and
+    never produce the .md.
 
     A truncated JSON (process killed mid-write) fails to parse -> re-run. An
     empty segments list is legitimate (silent audio), so it counts as done; that
@@ -150,6 +162,14 @@ def is_done(json_path):
         return False, "previous run recorded an error"
     if not isinstance(data.get("segments"), list) or "duration" not in data:
         return False, "output is missing segments/duration"
+    md = md_path or os.path.splitext(json_path)[0] + ".md"
+    if not os.path.exists(md):
+        return False, "markdown missing"
+    try:
+        if os.path.getsize(md) <= 0:
+            return False, "markdown is empty"
+    except OSError as exc:
+        return False, "markdown unreadable (%s)" % exc
     return True, ""
 
 
@@ -190,26 +210,37 @@ def read_metrics(json_path):
             "asr_s": d.get("asr_s"), "fallback": bool(d.get("fallback"))}
 
 
-def stage_aside(json_path):
-    """Move an existing output to .prev before a re-run.
+def md_for(json_path):
+    return os.path.splitext(json_path)[0] + ".md"
 
-    Otherwise a failed --force run would leave the old JSON in place, is_done()
-    would say 'done' next time and the file would be skipped forever.
+
+def stage_aside(json_path):
+    """Move the existing output pair to .prev before a re-run.
+
+    Two failure modes this prevents:
+
+      1. A failed --force run would leave the old JSON in place, is_done() would
+         say 'done' next time, and the file would be skipped forever.
+      2. If only the JSON were moved, the *stale* .md would stay behind at its
+         normal path - and the .md is the file a human actually reads. After a
+         failed re-run the folder would show a believable transcript with no
+         JSON beside it, which looks like a successful result.
     """
-    prev = json_path + ".prev"
-    try:
-        if os.path.exists(json_path):
-            os.replace(json_path, prev)
-    except OSError:
-        pass
+    for path in (json_path, md_for(json_path)):
+        try:
+            if os.path.exists(path):
+                os.replace(path, path + ".prev")
+        except OSError:
+            pass
 
 
 def drop_prev(json_path):
-    try:
-        if os.path.exists(json_path + ".prev"):
-            os.remove(json_path + ".prev")
-    except OSError:
-        pass
+    for path in (json_path, md_for(json_path)):
+        try:
+            if os.path.exists(path + ".prev"):
+                os.remove(path + ".prev")
+        except OSError:
+            pass
 
 
 def run_one(src, out_json, key, opts):
@@ -236,10 +267,17 @@ def run_one(src, out_json, key, opts):
 
     rec["wall_s"] = round(time.time() - started, 2)
     rec["exit_code"] = proc.returncode
-    if proc.returncode == 0 and is_done(out_json)[0]:
-        rec["status"] = "ok"
-        rec.update(read_metrics(out_json))
-        drop_prev(out_json)
+    if proc.returncode == 0:
+        done, why = is_done(out_json)
+        if done:
+            rec["status"] = "ok"
+            rec.update(read_metrics(out_json))
+            drop_prev(out_json)
+            return rec
+        # Exit 0 but half a deliverable (typically a JSON with no .md). Never
+        # report that as ok: the next run sees the same incomplete pair and
+        # retries, so the missing half does get produced.
+        rec["error"] = "exited 0 but output is incomplete: %s" % why
         return rec
     stderr = proc.stderr.decode("utf-8", "replace")
     stdout = proc.stdout.decode("utf-8", "replace")
@@ -257,6 +295,18 @@ def write_json_atomic(path, data):
         json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     os.replace(tmp, path)
+
+
+def non_wav(items):
+    """Planned inputs whose extension is not .wav.
+
+    transcribe.py measures duration with the stdlib `wave` module, so anything
+    else fails there with exit 2. That check is the authority; this one only
+    exists to say so *before* the user waits through a batch. Non-blocking on
+    purpose: two gates that disagree would both need to be kept in sync.
+    """
+    return [it["src"] for it in items
+            if os.path.splitext(it["src"])[1].lower() != ".wav"]
 
 
 def counts_of(records):
@@ -301,6 +351,7 @@ def payload(records, meta, finished, elapsed):
         "results": [{"src": r["src"], "key": r["key"],
                      "out_json": os.path.relpath(r["out_json"], meta["out_dir"]),
                      "status": r["status"], "exit_code": r["exit_code"],
+                     "skip_reason": r.get("skip_reason", ""),
                      "wall_s": r["wall_s"], "audio_s": r.get("audio_s"),
                      "device": r.get("device"), "rtf_x": r.get("rtf_x"),
                      "fallback": r.get("fallback", False),
@@ -317,7 +368,9 @@ def main():
                     help="where <key>.json / <key>.md go (also holds _batch/summary.json)")
     ap.add_argument("--model", default="", help="CTranslate2 model dir (required unless --dry-run)")
     ap.add_argument("--pattern", nargs="+", default=["*.wav"],
-                    help="filename patterns, case-insensitive (default: *.wav)")
+                    help="filename patterns, case-insensitive (default: *.wav). "
+                         "Selects names only - it does not add decoders, and "
+                         "transcribe.py reads PCM WAV only")
     ap.add_argument("--recursive", action="store_true", help="descend into subfolders")
     ap.add_argument("--force", action="store_true", help="re-run even if output exists")
     ap.add_argument("--dry-run", action="store_true", help="list the plan, run nothing")
@@ -358,6 +411,17 @@ def main():
         plan.append(rec)
 
     todo = [p for p in plan if p["status"] == "pending"]
+    others = non_wav(items)
+    if others:
+        print("[WARN] %d of %d matched file(s) are not .wav; transcribe.py reads "
+              "PCM WAV via the stdlib wave module, so these will fail:"
+              % (len(others), len(items)))
+        for src in others[:3]:
+            print("       %s" % src)
+        if len(others) > 3:
+            print("       ... and %d more" % (len(others) - 3))
+        print("       convert first: ffmpeg -y -i X -vn -ac 1 -ar 16000 "
+              "-c:a pcm_s16le X.wav")
     print("inputs   : %s" % ", ".join(a.input))
     print("pattern  : %s%s" % (" ".join(a.pattern),
                                "  (recursive)" if a.recursive else ""))

@@ -99,6 +99,28 @@ def read_duration(path):
     return duration
 
 
+def write_pair(json_path, data, md_path, lines):
+    """Write the JSON + MD deliverable as one unit.
+
+    Each file is staged as `<name>.tmp` and renamed into place, and the MD is
+    renamed **before** the JSON. That order is the whole point: it makes
+    "json exists" imply "md exists", so a hard kill (Ctrl-C, power loss,
+    --timeout) can never leave a complete-looking JSON next to a missing
+    transcript. batch_transcribe.py treats the pair as the unit of work and
+    would otherwise either report a half-deliverable as ok, or re-run the file
+    on every subsequent batch.
+    """
+    jtmp, mtmp = json_path + ".tmp", md_path + ".tmp"
+    with open(mtmp, "w", encoding="utf-8", newline="\n") as fh:
+        for line in lines:
+            fh.write(line)
+    with open(jtmp, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+    os.replace(mtmp, md_path)
+    os.replace(jtmp, json_path)
+
+
 def punct_per_100(text):
     n = len(re.findall(r"[，。！？、,.!?;；:：]", unicodedata.normalize("NFKC", text)))
     return round(n / max(len(text), 1) * 100, 2)
@@ -250,14 +272,12 @@ def main():
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    with open(a.out, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=1)
     md_path = os.path.splitext(a.out)[0] + ".md"
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write("# %s\n\n- 设备: %s / %s | 时长: %.2fs | 实时倍率: %s×\n\n"
-                % (out["tag"], device, compute, duration, out["rtf_x"]))
-        for x in items:
-            f.write("[%.2f - %.2f] %s\n\n" % (x["s"], x["e"], x["t"]))
+    md = ["# %s\n\n- 设备: %s / %s | 时长: %.2fs | 实时倍率: %s×\n\n"
+          % (out["tag"], device, compute, duration, out["rtf_x"])]
+    for x in items:
+        md.append("[%.2f - %.2f] %s\n\n" % (x["s"], x["e"], x["t"]))
+    write_pair(a.out, out, md_path, md)
 
     print("OK %s | %s/%s | %.2fs audio in %.2fs (%.2fx) | %d segs / %d chars%s"
           % (out["tag"], device, compute, duration, asr_s, out["rtf_x"],

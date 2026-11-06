@@ -50,7 +50,9 @@ python scripts/batch_transcribe.py --input "素材A" --out-dir "out" --model "<�
 python scripts/qc_check.py "out/*.json"        # 摘要不在 out/ 根下，不会被误报
 ```
 
-> 默认只收 `*.wav`（流程上仍建议先用 FFmpeg 统一成 16 kHz 单声道）。子目录要 `--recursive`；确需别的扩展名用 `--pattern "*.wav" "*.m4a"`，但先拿一条试通再上批量。重跑同一条命令只重试失败项；`--timeout` 默认 1800 s/文件。
+> 默认只收 `*.wav`（流程上仍建议先用 FFmpeg 统一成 16 kHz 单声道）。子目录要 `--recursive`；`--pattern` 只决定**收哪些文件名**，不增加解码能力——当前**只支持标准库 `wave` 能读的 PCM WAV**（`transcribe.py` 用它读时长），`*.m4a` / `*.mp3` 之类收进来也会在转写时以 `cannot read WAV` 退出 2。要跑这些格式，先转成 WAV；批量脚本遇到非 `.wav` 匹配会在开跑前打一条 `[WARN]` 并给出转换命令。重跑同一条命令只重试失败项；`--timeout` 默认 1800 s/文件。
+>
+> 每个输入产出的是**一组成套产物**：`<key>.json` + `<key>.md`。跳过判据是这一组都完整（JSON 可解析且含 `segments`/`duration`，MD 存在且非空），所以中途被 Ctrl-C / 断电打断、只留下 JSON 的文件，下一轮会自动补跑，不会被当成「已完成」。
 
 ### Windows PowerShell 写法
 

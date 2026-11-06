@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Offline unit tests for scripts/batch_transcribe.py.
+"""Offline unit + integration tests for scripts/batch_transcribe.py.
 
 Covers the parts a real run cannot cheaply exercise: key derivation and
-collision handling, the "is this file already done" rule, the skip-forever trap
-after a failed --force, the command it hands to transcribe.py, and the summary
-shape/encoding. No model, no GPU, no network, no ffmpeg.
+collision handling, the "is this pair of outputs done" rule, the skip-forever
+trap after a failed --force, the .md half of every output, the command it hands
+to transcribe.py, and the summary shape/encoding.
 
-The CLI is exercised through --dry-run, which is the only path that needs
-neither a model nor a real audio file.
+The integration cases drive main() end to end with a *fake* transcribe.py
+(monkeypatched into the module), so the loop, the skip rule, failure isolation
+and --force staging are all exercised without a model, GPU, network or ffmpeg.
+The fake writes whatever the test asks for - including a JSON with no .md,
+which is exactly the half-deliverable a killed real run leaves behind.
 
 Run:  python tests/run_batch_unit.py
 """
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -142,6 +146,7 @@ def case_collisions(tmp):
 
 def case_is_done(tmp):
     p = os.path.join(tmp, "d.json")
+    m = os.path.join(tmp, "d.md")
     ok(not bt.is_done(p)[0], "absent -> not done")
 
     open(p, "w").close()
@@ -160,28 +165,53 @@ def case_is_done(tmp):
     touch(p, [1, 2, 3])
     ok(not bt.is_done(p)[0], "not an object -> not done")
 
+    # The pair rule: a valid JSON with no transcript beside it is half a result.
     touch(p, {"duration": 5.0, "segments": [], "text": "", "error": None})
-    ok(bt.is_done(p)[0], "silent file with empty segments counts as done")
+    done, why = bt.is_done(p)
+    ok(not done, "json without md -> not done")
+    ok("markdown" in why, "missing md is named in the reason, got %r" % why)
+
+    touch(m, "")
+    ok(not bt.is_done(p)[0], "empty md -> not done")
+
+    touch(m, "# 会话 01\n")
+    ok(bt.is_done(p)[0], "json + non-empty md -> done")
 
     touch(p, GOOD)
-    ok(bt.is_done(p)[0], "well-formed output -> done")
+    ok(bt.is_done(p)[0], "well-formed pair -> done")
+    ok(bt.is_done(p, m)[0], "explicit md path accepted")
+    ok(not bt.is_done(p, os.path.join(tmp, "nope.md"))[0],
+       "explicit md path is honoured, not derived")
 
 
 def case_prev_rotation(tmp):
     p = os.path.join(tmp, "r.json")
+    m = os.path.join(tmp, "r.md")
     touch(p, GOOD)
+    touch(m, "# 旧稿\n")
     bt.stage_aside(p)
     ok(not os.path.exists(p) and os.path.exists(p + ".prev"),
-       "stage_aside moves the old output away")
+       "stage_aside moves the old json away")
+    ok(not os.path.exists(m) and os.path.exists(m + ".prev"),
+       "stage_aside moves the old md too (the human-readable half)")
     # While .prev exists and r.json does not, the file is retried - not skipped.
     ok(not bt.is_done(p)[0], "staged file is not 'done'")
     bt.drop_prev(p)
-    ok(not os.path.exists(p + ".prev"), "drop_prev removes the backup")
+    ok(not os.path.exists(p + ".prev") and not os.path.exists(m + ".prev"),
+       "drop_prev removes both backups")
 
     if os.path.exists(p):
         os.remove(p)
     bt.stage_aside(p)          # nothing to move: must not raise
     ok(not os.path.exists(p), "stage_aside is a no-op when there is no output")
+
+
+def case_non_wav():
+    items = [{"src": "a.wav"}, {"src": "b.WAV"}, {"src": "c.m4a"},
+             {"src": "d.mp3"}]
+    eq([os.path.basename(x) for x in bt.non_wav(items)], ["c.m4a", "d.mp3"],
+       "non_wav keeps only the non-.wav inputs")
+    eq(bt.non_wav([]), [], "empty plan has nothing to warn about")
 
 
 # ---------------------------------------------------------------- command ---
@@ -270,8 +300,15 @@ def case_cli(tmp):
 
     # Pretend one file is already done -> it must be skipped, the other planned.
     bt.write_json_atomic(os.path.join(out, "01.json"), GOOD)
+    touch(os.path.join(out, "01.md"), "# 01\n")
     r = run_cli(["--input", src, "--out-dir", out, "--dry-run"], tmp)
-    ok("1 to run, 1 already done" in r.stdout, "existing output is skipped")
+    ok("1 to run, 1 already done" in r.stdout, "existing pair is skipped")
+
+    # Same JSON, no md -> half a deliverable, so it must be planned again.
+    os.remove(os.path.join(out, "01.md"))
+    r = run_cli(["--input", src, "--out-dir", out, "--dry-run"], tmp)
+    ok("2 to run, 0 already done" in r.stdout,
+       "json without md is planned again, not skipped")
 
     r = run_cli(["--input", src, "--out-dir", out, "--dry-run", "--force"], tmp)
     ok("2 to run, 0 already done" in r.stdout, "--force ignores existing output")
@@ -286,12 +323,162 @@ def case_cli(tmp):
     ok("[ERROR] no file matched" in r.stdout, "no match explains itself")
 
 
+# ------------------------------------------------------------ integration ---
+
+# Stands in for transcribe.py. The content of the "wav" is the instruction, so
+# a test can flip a single file from ok -> fail by rewriting four bytes.
+FAKE_TRANSCRIBE = '''# -*- coding: utf-8 -*-
+import argparse, json, os, sys
+ap = argparse.ArgumentParser()
+for flag in ("--wav", "--model", "--out", "--tag", "--device", "--compute",
+             "--language"):
+    ap.add_argument(flag)
+a = ap.parse_args()
+mode = open(a.wav, encoding="utf-8").read().strip()
+if mode == "fail":
+    sys.stderr.write("CUDA error: no CUDA-capable device is detected\\n")
+    sys.exit(3)
+if mode == "jsononly":
+    json.dump({"duration": 4.0, "segments": [], "text": "", "error": None},
+              open(a.out, "w", encoding="utf-8"))
+    sys.exit(0)
+json.dump({"duration": 4.0, "segments": [{"s": 0.0, "e": 4.0, "t": "你好"}],
+           "text": "你好", "error": None, "device": "cuda", "rtf_x": 9.0,
+           "load_s": 1.0, "asr_s": 0.4, "fallback": None},
+          open(a.out, "w", encoding="utf-8"))
+open(os.path.splitext(a.out)[0] + ".md", "w", encoding="utf-8").write("# t\\n")
+sys.exit(0)
+'''
+
+
+def run_main(argv, script):
+    """Call bt.main() in-process; returns (exit_code, captured stdout)."""
+    old_argv, old_script, old_out = sys.argv, bt.TRANSCRIBE, sys.stdout
+    buf = io.StringIO()
+    code = 0
+    bt.TRANSCRIBE = script
+    sys.argv = ["batch_transcribe.py"] + argv
+    try:
+        sys.stdout = buf
+        try:
+            bt.main()
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else 1
+    finally:
+        sys.stdout = old_out
+        sys.argv = old_argv
+        bt.TRANSCRIBE = old_script
+    return code, buf.getvalue()
+
+
+def case_integration(tmp):
+    fake = os.path.join(tmp, "fake_transcribe.py")
+    with open(fake, "w", encoding="utf-8") as fh:
+        fh.write(FAKE_TRANSCRIBE)
+    src = os.path.join(tmp, "batch_in")
+    touch(os.path.join(src, "01.wav"), "ok")
+    touch(os.path.join(src, "02bad.wav"), "fail")
+    touch(os.path.join(src, "03.wav"), "ok")
+    out = os.path.join(tmp, "batch_out")
+    run = lambda extra=None: run_main(
+        ["--input", src, "--out-dir", out, "--model", "M"] + (extra or []), fake)
+
+    # 1) ok / fail / ok - the failure must not stop the batch.
+    code, log = run()
+    eq(code, 1, "one failed file -> exit 1")
+    ok(os.path.exists(os.path.join(out, "01.md")),
+       "successful file gets its md")
+    ok(os.path.exists(os.path.join(out, "03.json")) and
+       os.path.exists(os.path.join(out, "03.md")),
+       "the file after the failure still ran")
+    ok(not os.path.exists(os.path.join(out, "02bad.json")),
+       "failed file leaves no json")
+    ok("FAILED" in log and "no CUDA-capable device" in log,
+       "failure reason surfaces in the log")
+    summary = json.load(open(os.path.join(out, "_batch", "summary.json"),
+                             encoding="utf-8"))
+    eq(summary["counts"],
+       {"total": 3, "ok": 2, "skipped": 0, "failed": 1, "timeout": 0},
+       "summary counts after a partial batch")
+    eq(summary["finished"], True, "summary marked finished")
+
+    # 2) second run: finished pairs are skipped, only the failure retries.
+    code, log = run()
+    eq(code, 1, "unfixed failure still exits 1")
+    ok("1 to run, 2 already done" in log, "finished pairs are skipped on re-run")
+
+    # 3) fix the bad file -> only it runs, and the batch is clean.
+    touch(os.path.join(src, "02bad.wav"), "ok")
+    code, log = run()
+    eq(code, 0, "after the fix the batch exits 0")
+    ok("1 to run, 2 already done" in log, "only the fixed file is retried")
+    ok(os.path.exists(os.path.join(out, "02bad.md")), "fixed file gets its md")
+
+    # 4) JSON written, MD never written: half a deliverable, never "done".
+    src2 = os.path.join(tmp, "batch_in2")
+    touch(os.path.join(src2, "j.wav"), "jsononly")
+    out2 = os.path.join(tmp, "batch_out2")
+    run2 = lambda: run_main(["--input", src2, "--out-dir", out2,
+                             "--model", "M"], fake)
+    code, log = run2()
+    eq(code, 1, "json-only output counts as a failure, not ok")
+    ok("output is incomplete" in log, "reason names the incomplete pair")
+    ok(os.path.exists(os.path.join(out2, "j.json")), "the orphan json is kept")
+    code, log = run2()
+    ok("1 to run, 0 already done" in log,
+       "json without md is retried, never skipped")
+
+    # 5) --force that fails must move BOTH halves aside: a stale .md left at
+    #    the live path is the one thing a reader would mistake for this run.
+    touch(os.path.join(src, "01.wav"), "fail")
+    code, log = run(["--force"])
+    eq(code, 1, "--force with a failure exits 1")
+    ok(not os.path.exists(os.path.join(out, "01.json")),
+       "no live json after a failed re-run")
+    ok(not os.path.exists(os.path.join(out, "01.md")),
+       "no live md after a failed re-run (stale transcript is not left behind)")
+    ok(os.path.exists(os.path.join(out, "01.json.prev")), "old json staged")
+    ok(os.path.exists(os.path.join(out, "01.md.prev")), "old md staged")
+
+    # 6) a staged file is retried, and success clears both backups.
+    touch(os.path.join(src, "01.wav"), "ok")
+    code, log = run()
+    eq(code, 0, "retry after staging succeeds")
+    ok("1 to run, 2 already done" in log, "the staged file is retried")
+    ok(not os.path.exists(os.path.join(out, "01.json.prev")),
+       "json backup dropped on success")
+    ok(not os.path.exists(os.path.join(out, "01.md.prev")),
+       "md backup dropped on success")
+
+    # 7) nothing left to do.
+    code, log = run()
+    eq(code, 0, "a fully finished batch still exits 0")
+    ok("0 to run, 3 already done" in log, "everything is done at the end")
+
+
+def case_non_wav_warning(tmp):
+    fake = os.path.join(tmp, "fake_transcribe.py")
+    with open(fake, "w", encoding="utf-8") as fh:
+        fh.write(FAKE_TRANSCRIBE)
+    src = os.path.join(tmp, "mix")
+    touch(os.path.join(src, "a.wav"), "ok")
+    touch(os.path.join(src, "b.m4a"), "ok")
+    code, log = run_main(["--input", src, "--out-dir", os.path.join(tmp, "mo"),
+                          "--pattern", "*.wav", "*.m4a", "--dry-run"], fake)
+    eq(code, 0, "dry-run still exits 0")
+    ok("[WARN]" in log, "non-.wav match is flagged")
+    ok("b.m4a" in log, "the warning names the offending file")
+    ok("pcm_s16le" in log, "the warning shows the ffmpeg conversion")
+    ok("1 of 2" in log, "the warning counts them")
+
+
 def main():
     print("batch_transcribe.py - offline unit tests")
     print("=" * 62)
     case_clean_key()
     case_key_for()
     case_build_cmd()
+    case_non_wav()
     with tempfile.TemporaryDirectory() as tmp:
         case_walk_and_collect(tmp)
         case_collisions(tmp)
@@ -299,6 +486,8 @@ def main():
         case_prev_rotation(tmp)
         case_summary(tmp)
         case_cli(tmp)
+        case_integration(tmp)
+        case_non_wav_warning(tmp)
 
     print()
     print("%d assertions, %d failures." % (checks[0], len(failures)))

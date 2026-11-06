@@ -33,8 +33,8 @@ python scripts/transcribe.py --wav "<编号>.wav" --model "<模型目录>" \
 # 6. 质检 + 自检测试
 python scripts/qc_check.py "out/A1_<编号>.json"
 python tests/run_smoke.py          # 质检契约：33 类输入 / 883 条断言
-python tests/run_transcribe_unit.py  # 回退决策与耗时口径：35 条断言
-python tests/run_batch_unit.py     # 批处理规划 / 跳过判据 / 摘要：61 条断言
+python tests/run_transcribe_unit.py  # 回退决策、耗时口径、产物原子写入：43 条断言
+python tests/run_batch_unit.py     # 批处理规划 / 跳过判据 / 端到端：102 条断言
 ```
 
 **整文件夹跑**（串行、跳过已完成、失败隔离）：
@@ -46,7 +46,7 @@ python scripts/batch_transcribe.py ... --dry-run     # 只看计划，不执行�
 python scripts/batch_transcribe.py ... --force       # 忽略已有输出重跑
 ```
 
-每个输入得到一份独立的 `<key>.json` + `.md`（与单跑同 schema），汇总在 `out/_batch/summary.json`；**退出码 0 全成、1 有失败或超时、2 用法/匹配错误**。重跑同一条命令即只重试失败项。
+每个输入得到一份独立的 `<key>.json` + `.md`（与单跑同 schema），两者是**一组**：跳过判据要求两份都完整，所以只写完 JSON 就被中断的文件会下一轮自动补跑。汇总在 `out/_batch/summary.json`；**退出码 0 全成、1 有失败或超时、2 用法/匹配错误**。重跑同一条命令即只重试失败项。`--pattern` 只筛文件名，不增加解码能力：输入必须是 PCM WAV，其他格式先 FFmpeg 转，匹配到非 `.wav` 时开跑前会打 `[WARN]`。
 
 **输出**：`out/A1_<编号>.json`（结构化：`duration` / `device` / `segments[{s,e,t}]` / `stats`）+ 同名 `.md`（带时间戳可读版）。`qc_check.py` 退出码 0 = 无需复核，1 = 有 ERROR 或 RED/REVIEW；**RED 表示「需人工复核」，不等于判错**。
 
@@ -187,8 +187,8 @@ asr-transcription/
 │                             #   时间轴无效(负值/倒序/乱序) → 时间指标置 null
 ├── tests/
 │   ├── run_smoke.py          # 零依赖回归：质检契约 33 类输入 / 883 条断言
-│   ├── run_transcribe_unit.py # 零依赖单测：回退决策 / 耗时口径 / DLL 句柄
-│   └── run_batch_unit.py     # 零依赖单测：键名 / 碰撞 / 跳过判据 / 摘要编码
+│   ├── run_transcribe_unit.py # 零依赖单测：回退 / 耗时口径 / 产物原子写入 / DLL
+│   └── run_batch_unit.py     # 零依赖单测 + 端到端（假 transcribe.py）
 └── docs/
     └── 转写经验_通用版.md     # 完整原文归档；运行时以 references 为准
 ```
@@ -204,14 +204,16 @@ asr-transcription/
 | 环境自检 | ✅ 已自动化 | `scripts/check_env.py`（打印版本 / 显卡 / DLL / 磁盘 / 模型目录） |
 | 主力转写 | ✅ 已自动化 | `scripts/transcribe.py`（GPU→CPU 回退、统一 JSON + MD） |
 | 结果质检 | ✅ 已自动化 | `scripts/qc_check.py`（ERROR / RED 分级、退出码可进 CI） |
-| 批量转写 | ✅ 已自动化 | `scripts/batch_transcribe.py`（串行、跳过已完成、失败隔离、每文件独立 JSON + `_batch/summary.json`） |
+| 批量转写 | ✅ 已自动化 | `scripts/batch_transcribe.py`（串行、跳过已完成、失败隔离、每文件独立 JSON+MD + `_batch/summary.json`） |
 | 回归测试 | ✅ 已自动化 | `tests/run_smoke.py` + `tests/run_transcribe_unit.py` + `tests/run_batch_unit.py`（不依赖网络 / 模型 / GPU） |
 | 抽音频、异源方案对照、差异对齐、精编、留痕 | 🤝 **Agent 工作流** | Skill 指导 Agent 调命令、判读结果、组织人工复核；**没有对应脚本** |
 | 首末段回听、建术语表、提供标准答案、商用许可核对 | 👤 手动 | 需人工判断 |
 
 > **SenseVoice q8 GGUF 当前状态**：可选的独立对照方案，命令见 `references/03-parameters.md` / `10-commands.md`；需要自行下载 FunASR GGUF 运行时与权重，**仓库不含这些二进制，也没有封装脚本**。它输出没有可用时间戳，只能当纯文本第二意见。
 >
-> **批处理**已不再是文档约定：`scripts/batch_transcribe.py` 只做四件事——**串行**（一次一个模型实例）、**跳过已完成**（判据是输出 JSON 可解析且含 `segments`/`duration`）、**失败隔离**（单文件非零退出或超时不影响其余）、**每文件独立 JSON**。没有任务队列、没有并发、没有第二份进度文件：**输出 JSON 本身就是状态**。`--force` 会先把旧输出改名为 `<key>.json.prev`，所以失败了不会留下一个「看起来已完成」的旧文件把该文件永久跳过。工程要点见 `references/02-workflow.md` §2.2。
+> **批处理**已不再是文档约定：`scripts/batch_transcribe.py` 只做四件事——**串行**（一次一个模型实例）、**跳过已完成**、**失败隔离**（单文件非零退出或超时不影响其余）、**每文件独立 JSON**。没有任务队列、没有并发、没有第二份进度文件：**输出产物本身就是状态**。
+>
+> 一个任务是**一组成套产物**（`<key>.json` + `<key>.md`），所以跳过判据也是这一组：JSON 可解析、无 `error`、含 `segments`/`duration`，且 MD 存在非空。写入端配合这一点——`transcribe.py` 先把两份都写到 `.tmp`，**先改名 MD、后改名 JSON**，因此「有 JSON ⇒ 有 MD」，被中断的文件下一轮一定会补跑而不是被永久跳过。`--force` 同样把两份一起改名成 `<key>.json.prev` / `<key>.md.prev`：只挪 JSON 会把旧逐字稿留在原位，而 `.md` 恰恰是人会读的那份。工程要点见 `references/02-workflow.md` §2.2。
 
 ---
 

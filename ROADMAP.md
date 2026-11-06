@@ -17,7 +17,23 @@
 | v0.4.1 | 2026-11-06 | 许可证打包修正：`LICENSE` 去掉正文后的附加段落（GitHub 因此识别为 `NOASSERTION`），恢复为纯 MIT 正文；授权范围、第三方归属与「不含模型权重/音频」声明移入新建的 `NOTICE.md`。无代码改动。 |
 | **v0.4.2** | **2026-11-06** | 依据第四轮审核区分「能解析」与「时间轴有效」：负起点 / `end < start` / 乱序一律使三个时间指标置 `null`、`has_timestamps=false`，`note` 新增 `INVALID TIMELINE`。测试 33 类 / 881 断言（+18）。 |
 | **v0.5** | **2026-11-06** | C2 落地：新增 `scripts/batch_transcribe.py`（串行、跳过已完成、失败隔离、每文件独立 JSON）+ `tests/run_batch_unit.py`（61 断言）。同时把 B4「不写批处理脚本」的决定显式改口，理由见下。 |
+| **v0.5.1** | **2026-11-06** | 依据第七轮审核修产物一致性：JSON 与 MD 视为**一组**交付物（跳过判据要求两份都完整、`--force` 两份一起进 `.prev`、写入端先改名 MD 后改名 JSON 保证「有 JSON ⇒ 有 MD」）；文档撤回 `--pattern "*.m4a"` 的错误示例并明确只支持 PCM WAV，批量开跑前对非 `.wav` 告警；补端到端批处理集成测试（假 `transcribe.py` 驱动 `main()`）。批处理 61 → 102 断言，transcribe 单测 35 → 43。 |
 | **v0.4.3** | **2026-11-06** | 依据第五轮审核修 Windows 可移植性：测试 harness 强制子进程 UTF-8（普通 zh-CN 控制台原本 2 failures）；`--json` 重定向到文件时强制 UTF-8（原本是 GBK，非合法 JSON）；ROADMAP 自检命令改用 `compileall`；移除只影响解码、不产出 `words` 的 `--word-timestamps`；性能表补样本量与时长。测试 33 类 / 883 断言。 |
+
+### v0.5.1 产物一致性（第七轮审核）
+
+| 项 | 结果 |
+|---|---|
+| 触发 | 审核指出「JSON 与 MD 可能不一致」，并给出四条：两条 P1（完成判据只看 JSON、`--force` 只暂存 JSON）、两条 P2（`--pattern` 示例暗示支持 m4a、批处理缺端到端测试）。 |
+| 复现（改前实测） | ① 用只写 JSON 的假 `transcribe.py` 跑一个文件：首轮报 **`ok`**、退出码 0，`out/` 里只有 `01.json` 没有 `01.md`；次轮直接 `1 already done` 跳过——**那份给人看的 `.md` 永远不会生成**。② 先跑出正常的一对产物，再 `--force` + 子进程失败：`01.json` 变成 `01.json.prev`，但 **`01.md` 留在原位**，内容还是上一轮的。③ `--pattern "*.wav" "*.m4a"` 能收进 m4a，随后以 `cannot read WAV …: Error: file does not start with RIFF id` 退出 2。④ `tests/run_batch_unit.py` 只覆盖键名/碰撞/判据/摘要 + `--dry-run`，整条批处理循环从未被自动化跑过。四条全部成立。 |
+| 修法 1（完成判据） | `is_done(json_path, md_path=None)` 增加 MD 校验：存在且非空。缺 MD 时 `run_one` 不再借 `exit code 0, no message` 兜底，而是记 `exited 0 but output is incomplete: markdown missing` 并判 `failed`——**退出码 0 不等于交付完成**。`--dry-run` 的 `skip_reason` 也进了 `_batch/summary.json`，跳过原因可见。 |
+| 修法 2（写入顺序，审核没提但必需） | 只加判据会带来一个新坑：真被 kill 在半路时，JSON 完好、MD 缺失，于是**每一轮都重跑这个文件**。所以 `transcribe.py` 新增 `write_pair()`：两份各写 `.tmp`，**先 `os.replace` MD、后 `os.replace` JSON**。不变式变成「有 JSON ⇒ 有 MD」，判据只是兜底（也兼容 v0.5 生成的旧输出）。这是把「检测不一致」换成「构造上不可能不一致」。 |
+| 修法 3（`--force` 成对） | `stage_aside` / `drop_prev` 改为同时处理 `<key>.json` 与 `<key>.md`。审核说「旧 MD 留下来会被误认为本次结果」——实际风险比他描述的更高：`.json` 缺失时人也不会去读 JSON，但 `.md` 是**唯一会被直接打开阅读的那份**，它留下就等于留下了一份假结果。 |
+| 修法 4（格式表述） | `references/10-commands.md` 删掉 `--pattern "*.wav" "*.m4a"` 示例；`02-workflow.md`、`README`、`SKILL.md`、`--pattern` 的 help 全部写明「只支持 stdlib `wave` 能读的 PCM WAV，`--pattern` 只筛文件名」。另加一条**开跑前**告警：匹配到非 `.wav` 时打印数量、前三个路径和一句 `ffmpeg … -c:a pcm_s16le` 转换命令。 |
+| 没照单全收 | ① 审核建议「不支持格式在扫描或执行前给出明确错误」——没有做成**硬失败**，只做 `[WARN]` 不阻断。理由：解码能力的事实来源是 `transcribe.py`（它先 `wave.open`，失败即退出 2），在批量侧再设一道硬门就是第二个事实来源，两边迟早不一致；告警负责「别白等」，真错误仍由子进程报。② 没有引入临时文件级的两阶段提交（写两遍再校验）。MD 先改名已经把不变式做到位，再加一层只会增加失败面。 |
+| 验证（真机） | `faster-whisper-large-v3-turbo` / `--device cpu --compute int8`，3 个文件（2 正常 + 1 坏 WAV）：首轮 2 ok + 1 failed、退出码 1；`out/` 只有 `01.json/.md`、`02.json/.md`，**无 `.tmp` 残留**；次轮 `1 to run, 2 already done`；把 `01.wav` 改坏后 `--force`：得到 `01.json.prev` + `01.md.prev`，**活路径上不再有 `01.md`**；非 `.wav` 匹配打印 `[WARN] 1 of 4 …` 并附 ffmpeg 命令。 |
+| 验证（离线） | `tests/run_batch_unit.py` **102 断言**（原 61）：新增 7 条 MD 判据 / 成对 `.prev` 断言，以及 `case_integration` 用假 `transcribe.py` 驱动 `main()` 跑完整循环——成功+失败+继续、二次运行只重试失败项、修复后转为成功、**JSON 无 MD 记失败且次轮仍重跑**、`--force` 失败后两份都进 `.prev`、恢复后备份被清掉、全完成时 0 to run；`case_non_wav_warning` 验告警。`tests/run_transcribe_unit.py` **43 断言**（原 35）：新增 `write_pair` 的两份落盘、**改名顺序（MD 先、JSON 后）**、无 `.tmp` 残留、覆盖写入。都不需要模型 / GPU / 网络 / ffmpeg。 |
+| 仍未做 | 单文件场景失败无产物（C4 未变）；目录级汇总报表；SRT 导出。 |
 
 ### v0.5 串行批处理（第六轮反馈 → C2 到期）
 
@@ -144,7 +160,7 @@ python tests/run_smoke.py` → **2 failures**（`no_duration` 找不到中文诊
 
 ### C2 批量处理与断点续跑（✅ 已于 v0.5 实现）
 
-触发条件：明确出现「一次要处理很多文件」的真实需求。**2026-11-06 触发**，已交付 `scripts/batch_transcribe.py`：串行、跳过已成功项、失败隔离、每文件独立结果，**没有**任务队列 / 数据库 / 并发调度。细节与验证见上文 v0.5 专节。
+触发条件：明确出现「一次要处理很多文件」的真实需求。**2026-11-06 触发**，已交付 `scripts/batch_transcribe.py`：串行、跳过已成功项、失败隔离、每文件独立结果，**没有**任务队列 / 数据库 / 并发调度。细节与验证见上文 v0.5 专节；v0.5.1 补齐了产物一致性（JSON 与 MD 成套判定、写入顺序、成对 `.prev`）。
 
 下一步（未排期，等真实需要再说）：目录级汇总报表、按目录分组的 qc 汇总。
 
@@ -166,7 +182,7 @@ python tests/run_smoke.py` → **2 failures**（`no_duration` 找不到中文诊
 1. **不破坏 `--json` 现有键**：`error` / `red` / `warn` / `duration` / `has_timestamps` / `note` 及全部指标键保留；新字段只能是附加。
 2. **不引入新依赖、不联网、不上传素材**；测试必须零依赖、可离线重复。
 3. **不放音频、模型权重、逐字稿、凭据或本机绝对路径进仓库**。
-4. **`SKILL.md` 保持精简**（v0.4 为 104 行 / 8.8 KB，远低于规范的 5k 词上限）；新增细节一律下放 `references/`（10 个文件），架构性说明放 `README.md`，版本规划放 `ROADMAP.md`。
+4. **`SKILL.md` 保持精简**（v0.5.1 为 106 行 / 10.0 KB，远低于规范的 5k 词上限）；新增细节一律下放 `references/`（10 个文件），架构性说明放 `README.md`，版本规划放 `ROADMAP.md`。
 5. **`docs/` 归档与 `references/` 防漂移**：事实性修正必须同步两份；Skill 层的增量说明（脚本契约、决策表、能力矩阵）只在 `references/` 与 `README.md` 维护，不回填归档。归档顶部已写明「不一致时以 references 为准」。
 6. **ERROR ≠ 判错**：ERROR 是输入数据问题，RED 是需人工复核；两者都不能写成「稿子转错了」。
 7. **没有可信标准答案就不报准确率**；差异度不是准确率；推测标推测，数字标出处。
@@ -182,7 +198,8 @@ python tests/run_smoke.py` → **2 failures**（`no_duration` 找不到中文诊
 ```bash
 python -m compileall -q scripts tests   # 跨 shell 可用；py_compile 的 *.py 通配在 Windows shell 下不展开
 python tests/run_smoke.py
-python tests/run_batch_unit.py            # 批处理：键名 / 跳过判据 / 摘要编码
+python tests/run_batch_unit.py            # 批处理：键名 / 跳过判据 / 摘要编码 / 端到端集成
+python tests/run_transcribe_unit.py       # 回退决策 / 耗时口径 / 产物原子写入
 # Windows 必做：清空 UTF-8 变量再跑一遍，避免「假绿」
 env -u PYTHONUTF8 -u PYTHONIOENCODING python tests/run_smoke.py
 python scripts/qc_check.py "out/<配置>_<编号>.json" --json
