@@ -7,7 +7,8 @@
 ## 附录 B：命令速查
 
 ```bash
-# 环境自检
+# 环境自检（退出码 0 = 必需项齐全，1 = 缺依赖 / 缺 ffmpeg / 指定模型不完整，可当门禁）
+python scripts/check_env.py --models "<模型目录>"
 nvidia-smi
 python -c "import faster_whisper, ctranslate2 as c; print(faster_whisper.__version__, c.get_cuda_device_count())"
 ffmpeg -version && ffprobe -version
@@ -42,7 +43,7 @@ python scripts/extract_subs.py --input "素材A" "素材B" --out-dir "out" --rec
 ### 没有字幕轨：读画面里的硬字幕
 
 ```bash
-python -m pip install rapidocr_onnxruntime onnxruntime     # 一次性，13 MB 模型随 wheel
+python -m pip install -r requirements-ocr.txt               # 一次性，13 MB 模型随 wheel
 python scripts/ocr_subs.py --input "<素材>" --list                        # 先探有没有会变的字幕带
 python scripts/ocr_subs.py --input "<素材>" --out-dir "out" --fps 1.0     # 逐帧读
 python scripts/ocr_subs.py --input "<素材>" --out-dir "out" --fps 0.5     # 长视频降采样，省一半时间
@@ -82,7 +83,7 @@ python scripts/batch_transcribe.py --input "素材A" --out-dir "out" --model "<�
 python scripts/qc_check.py "out/*.json"        # 摘要不在 out/ 根下，不会被误报
 ```
 
-> 默认只收 `*.wav`（流程上仍建议先用 FFmpeg 统一成 16 kHz 单声道）。子目录要 `--recursive`；`--pattern` 只决定**收哪些文件名**，不增加解码能力——当前**只支持标准库 `wave` 能读的 PCM WAV**（`transcribe.py` 用它读时长），`*.m4a` / `*.mp3` 之类收进来也会在转写时以 `cannot read WAV` 退出 2。要跑这些格式，先转成 WAV；批量脚本遇到非 `.wav` 匹配会在开跑前打一条 `[WARN]` 并给出转换命令。重跑同一条命令只重试失败项；`--timeout` 默认 1800 s/文件。
+> 默认收 WAV 与常见视频/音频容器（`.mp4 .mov .mkv .m4a .mp3 .flac` 等）。**非 WAV 会先用 ffmpeg 解成 16 kHz 单声道**，缓存在 `<out-dir>/_batch/audio/`，重跑复用、`--force` 才重抽；纯 WAV 批次完全不调用 ffmpeg。匹配到非 WAV 而 PATH 里没有 ffmpeg 时，开跑**之前**就以退出码 2 停下，不会逐个文件失败。子目录要 `--recursive`。重跑同一条命令只重试失败项；`--timeout` 默认 1800 s/文件，也用于单次 ffmpeg 解码。
 >
 > 每个输入产出的是**一组成套产物**：`<key>.json` + `<key>.md`。跳过判据是这一组都完整（JSON 可解析且含 `segments`/`duration`，MD 存在且非空），所以中途被 Ctrl-C / 断电打断、只留下 JSON 的文件，下一轮会自动补跑，不会被当成「已完成」。
 

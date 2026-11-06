@@ -6,10 +6,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1381%20offline%20assertions-brightgreen.svg" alt="1381 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1393%20offline%20assertions-brightgreen.svg" alt="1393 offline assertions">
 </p>
 
-An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1381 offline assertions.
+An agent-loadable Chinese ASR skill: **hearing** (speech transcription) + **seeing** (subtitle tracks / on-screen OCR) + **cross-checking the two**, with 1393 offline assertions.
 
 > [!NOTE]
 > This repository is AI-assisted. Every script and number has been verified by hand, and the process is recorded in [`ROADMAP.md`](ROADMAP.md). Platforms that were not tested are never described as supported — see [Known limitations](#known-limitations).
@@ -36,7 +36,7 @@ flowchart LR
 With the dependencies installed, one audio file takes three commands:
 
 ```powershell
-python -m pip install "faster-whisper==1.2.1" "ctranslate2==4.8.1" "av<19"
+python -m pip install -r requirements.txt
 python scripts/transcribe.py --wav "01.wav" --model "<model-dir>" --out "out/01.json" --tag "01"
 python scripts/qc_check.py "out/01.json"
 ```
@@ -125,17 +125,36 @@ The cross-check also answers two questions along the way: how many seconds the s
 | Model | A CTranslate2 directory with 5 files: `config.json` / `model.bin` / `preprocessor_config.json` / `tokenizer.json` / `vocabulary.json` |
 | Disk | turbo about 1.51 GiB, large-v3 about 2.88 GiB |
 
-Model weights are **not** in this repository; download them yourself (Hugging Face or a mirror). Without a model, `check_env.py` and all four test suites still run.
+Model weights are **not** in this repository; download them yourself (Hugging Face or a mirror). Without a model, `check_env.py` and all six test suites still run.
 
 ### Install
 
 ```powershell
 git clone https://github.com/ChenChen913/asr-transcription-skill.git "$env:USERPROFILE\.workbuddy\skills\asr-transcription"
 cd "$env:USERPROFILE\.workbuddy\skills\asr-transcription"
-python -m pip install "faster-whisper==1.2.1" "ctranslate2==4.8.1" "av<19"
+python -m pip install -r requirements.txt          # hearing: faster-whisper / CTranslate2 / av
+python -m pip install -r requirements-ocr.txt      # seeing: only ocr_subs.py needs this, optional
 ```
 
-Then check the environment. `check_env.py` is read-only and writes nothing; `run_smoke.py` needs no model, GPU, or network:
+Versions are pinned in those files (`faster-whisper==1.2.1`, `ctranslate2==4.8.1`, `av<19`; OCR side `rapidocr-onnxruntime==1.2.3`, `onnxruntime==1.24.2`, because rapidocr 2.x changed its result schema).
+
+### Download the models
+
+Both live in plain local folders; point `--model` at one.
+
+```powershell
+python -m pip install huggingface_hub
+# Behind the GFW, set the mirror first: $env:HF_ENDPOINT = "https://hf-mirror.com"
+
+hf download mobiuslabsgmbh/faster-whisper-large-v3-turbo `
+  --local-dir D:\hf-models\faster-whisper-large-v3-turbo     # 1.51 GiB, the workhorse
+hf download Systran/faster-whisper-large-v3 `
+  --local-dir D:\hf-models\faster-whisper-large-v3           # 2.88 GiB, hard-case review only
+```
+
+> `hf` is the huggingface_hub 1.x command; on 0.x it is `huggingface-cli download` with the same arguments. `mobiuslabsgmbh/faster-whisper-large-v3-turbo` is the CTranslate2 turbo repo registered in faster-whisper itself; the community `deepdml/faster-whisper-large-v3-turbo-ct2` also works but is a different conversion.
+
+Then check the environment. `check_env.py` is read-only and writes nothing, and **exits 1 when a dependency, ffmpeg, or a model is missing**, so it can gate CI; `run_smoke.py` needs no model, GPU, or network:
 
 ```powershell
 python scripts/check_env.py --models "<model-dir>"
@@ -201,7 +220,7 @@ The output uses the **same schema** as transcription (`out/01.json` + `out/01.md
 Use this when the subtitles are burned into the pixels and no text track exists. The OCR runtime has to be installed first (~13 MB of models ship inside the wheel; nothing else to download):
 
 ```text
-python -m pip install rapidocr_onnxruntime onnxruntime
+python -m pip install -r requirements-ocr.txt
 ```
 
 ```text
@@ -284,9 +303,9 @@ out/
 Two things that bite:
 
 - **`json` and `md` are one deliverable.** The skip rule requires both to be complete, and `--force` moves both aside as `.prev`. The writer renames the MD before the JSON, so "JSON exists ⇒ MD exists"; a task killed halfway is retried next run instead of being skipped forever.
-- **PCM WAV only.** `--pattern` selects file names, not decoders. When a non-`.wav` file matches, the batch prints a `[WARN]` plus an FFmpeg conversion command before starting, and does not block — the real decode error comes from `transcribe.py`.
+- **Non-WAV inputs are decoded for you.** Matched `.mp4/.mov/.mkv/.m4a/.mp3/.flac/...` files are converted to 16 kHz mono WAV with ffmpeg into `_batch/audio/` and reused on retry (`--force` re-decodes). A batch of WAV files never touches ffmpeg, so it still runs on a machine without it; when a non-WAV is matched and ffmpeg is missing, the batch stops before running with exit 2 instead of failing one file at a time.
 
-Exit codes: `0` all succeeded | `1` failures or timeouts | `2` usage or match error.
+Exit codes: `0` all succeeded | `1` failures or timeouts | `2` usage or match error, or a non-WAV match without ffmpeg.
 
 ### QC
 
@@ -430,7 +449,7 @@ There is **no config file, no API key, and no account**. Every parameter is a CL
 | `--input` | required | One or more directories, or explicit files |
 | `--out-dir` | required | Output directory; also holds `_batch/summary.json` |
 | `--model` | empty | May be omitted with `--dry-run` |
-| `--pattern` | `*.wav` | File-name pattern, case-insensitive; names only, no extra decoders |
+| `--pattern` | WAV plus common video/audio containers | File-name pattern, case-insensitive; non-WAV matches are decoded with ffmpeg, and a missing ffmpeg aborts before the run |
 | `--recursive` | off | Descend into subdirectories |
 | `--force` | off | Re-run even when output exists |
 | `--dry-run` | off | Print the plan only |
@@ -476,7 +495,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # serial batch runner
 │   ├── qc_check.py           # validation + four coarse metrics + three checks
 │   └── check_env.py          # read-only environment check
-├── tests/                    # six zero-dependency suites, 1381 assertions
+├── tests/                    # six zero-dependency suites, 1393 assertions
 └── docs/
     ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
     ├── 字幕识别与OCR_调研与设计.md  # three routes and measurements; the track part shipped as v0.6
@@ -557,7 +576,7 @@ A: Fixed in v0.5.1. `--force` now moves both the JSON and the MD aside as `.prev
 A: No. Accuracy needs a human-verified reference transcript as the denominator. Without one, this project reports where two engines disagree plus manual spot checks. On-screen subtitle OCR is supporting evidence only, never ground truth.
 
 **Q: Does it accept mp3 / m4a?**
-A: Not directly. Run `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le out.wav` first. `--pattern "*.m4a"` only collects the files; decoding then fails.
+A: Yes, through `batch_transcribe.py`: non-WAV matches are decoded to 16 kHz mono WAV with ffmpeg into `_batch/audio/` first. A single `transcribe.py` run still wants WAV, because it measures duration with the stdlib `wave` module — convert once with `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le out.wav`.
 
 ## Known limitations
 
@@ -576,6 +595,8 @@ A: Not directly. Run `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le out.wa
 - **Segment-level timestamps only.** No word-level `words`, no speaker diarisation, no direct SRT / VTT export (the `.srt` written by `extract_subs.py` is the source track, not generated by transcription).
 - **Seeing comes in two grades, both with edges.** `extract_subs.py` reads a sidecar `.srt/.ass/.ssa/.vtt` or an embedded **text** track with no inference (`engine=subtitle-track`); when there is none, `ocr_subs.py` reads the pixels frame by frame (`engine=ocr`). **Bitmap tracks (PGS/VobSub/DVB), vertical text, styled captions and occluded text are still unreadable**; OCR only searches the lower half, so subtitles at the top are never found. Nor can it separate text layered on the *same* line as the subtitle — splitting by vertical position separates lines, not the two pieces of text inside one line. What it can separate is furniture that sits on its own line and changes slower than the dialogue (bullet blocks, chapter labels, flowcharts): those are dropped by cadence, 50 runs across 6 clips; an animation that changes every frame still slips through (7 cues out of 25). It is slower than transcribing (~0.38 s per frame) and needs the OCR runtime — without it that one script fails loudly and the other five are unaffected.
 - **Small text is read less reliably.** At 640×360 a line is a dozen pixels tall and the same cue reads differently under two crop paddings (measured agreement 0.815). The output is still usable, but the error rate is clearly higher than on a 720p/1080p vertical clip.
+- **Hearing has almost no defence against English proper nouns.** Across 25 Chinese interview clips, `RAG` came out as `RIG` / `REG` **32 times**, and `DeepSeek`, `LangChain`, `Claude` were **never once spelled right**; OCR on the same clips got them 6 / 6 / 4 times. English abbreviations have to be corrected from the picture or a term list — an ASR-only draft will get them wrong.
+- **Fast mixed Chinese/English speech can vanish wholesale.** One measured **17.66 s** stretch produced no text at all, with normal loudness (−18.2 dB, same as the surrounding minutes) and with VAD disabled, while the picture carried subtitles for exactly that span. Only the LONG GAP check in `qc_check.py` catches it, so long gaps must be re-listened — that is not optional.
 - **Single-file failures leave no artefact.** Calling `transcribe.py` directly on a failing input produces nothing; only the exit code tells you. Batch covers it (`_batch/summary.json` records exit code and error tail); the single-file case is still C4 in `ROADMAP.md`.
 - **No accuracy claims.** Without a human reference there is no number. That is a rule, not modesty.
 - **SenseVoice is a second opinion only.** Its output has no usable timestamps, and it is clearly weaker on mixed Chinese/English proper nouns. It cannot produce a final transcript alone.

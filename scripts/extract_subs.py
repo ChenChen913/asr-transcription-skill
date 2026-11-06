@@ -4,13 +4,13 @@
 Why this comes before transcribe.py: an embedded text subtitle track is a
 zero-cost ground truth. No inference, no GPU, no misheard names - a few seconds
 to get a timestamped script. If the file has one, transcribing it is pure loss.
-So the order is: sidecar file -> embedded text track -> (v0.7) burned-in OCR ->
-ASR. This script owns the first two steps only.
+So the order is: sidecar file -> embedded text track -> burned-in OCR
+(scripts/ocr_subs.py) -> ASR. This script owns the first two steps only.
 
 Deliberately NOT done here, each for a reason:
 
   * bitmap tracks (PGS / VobSub / DVB): what comes out is a stream of images,
-    not text; reading them is OCR and belongs to v0.7.
+    not text; reading them is OCR and belongs to scripts/ocr_subs.py.
   * burned-in subtitles: those are pixels in the video frame, not a track.
   * timeline repair: overlapping cues are written exactly as the source has
     them. Rewriting a timestamp is editing evidence, and the overlap count is
@@ -160,7 +160,7 @@ def pick(subs, want_order=None, want_lang=None):
             return t, ""
     kinds = ", ".join("%s(%s)" % (t["codec"], classify(t["codec"])) for t in subs)
     return None, ("only bitmap subtitle track(s): %s; extracting them yields "
-                  "images and needs OCR (v0.7)" % kinds)
+                  "images - use scripts/ocr_subs.py instead" % kinds)
 
 
 # ------------------------------------------------------------------ parsing ---
@@ -633,8 +633,9 @@ def main():
     print("done: %d extracted, %d skipped, %d without usable subtitles"
           % (ok, skipped, len(records) - ok - skipped))
     if len(records) - ok - skipped:
-        print("next: those files have no text subtitle track - convert to WAV and "
-              "run scripts/transcribe.py (or wait for v0.7 burned-in OCR).")
+        print("next: those files have no text subtitle track - run "
+              "scripts/ocr_subs.py for burned-in subtitles, or convert to WAV "
+              "and run scripts/transcribe.py for the audio.")
     sys.exit(0 if records and len(records) - ok - skipped < len(records) else 3)
 
 

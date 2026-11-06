@@ -206,12 +206,47 @@ def case_prev_rotation(tmp):
     ok(not os.path.exists(p), "stage_aside is a no-op when there is no output")
 
 
-def case_non_wav():
-    items = [{"src": "a.wav"}, {"src": "b.WAV"}, {"src": "c.m4a"},
-             {"src": "d.mp3"}]
-    eq([os.path.basename(x) for x in bt.non_wav(items)], ["c.m4a", "d.mp3"],
-       "non_wav keeps only the non-.wav inputs")
-    eq(bt.non_wav([]), [], "empty plan has nothing to warn about")
+def case_needs_extract():
+    ok(bt.needs_extract("a.mp4"), "mp4 has to be decoded")
+    ok(bt.needs_extract("a.MOV"), "the extension check is case-insensitive")
+    ok(bt.needs_extract("a.m4a"), "m4a has to be decoded")
+    ok(bt.needs_extract("a.flac"), "flac has to be decoded")
+    ok(not bt.needs_extract("a.wav"), "wav is passed through untouched")
+    ok(not bt.needs_extract("a.WAV"), "uppercase .WAV is still a wav")
+    ok(not bt.needs_extract("noext"), "an unknown extension is left to transcribe.py")
+    items = [{"src": "a.wav"}, {"src": "b.WAV"}, {"src": "c.m4a"}, {"src": "d.mp3"}]
+    eq([os.path.basename(x) for x in bt.planned_extract(items)], ["c.m4a", "d.mp3"],
+       "planned_extract lists only the inputs that will be decoded")
+    eq(bt.planned_extract([]), [], "an empty plan has nothing to decode")
+
+
+def case_extract_audio(tmp):
+    # A WAV input never touches ffmpeg, so the path comes straight back.
+    wav = os.path.join(tmp, "in.wav")
+    touch(wav, "RIFF")
+    eq(bt.extract_audio(wav, "in", os.path.join(tmp, "out"), 10), (wav, None),
+       "a WAV is returned untouched")
+
+    # A cached decode is reused: point FFMPEG at a command that cannot exist,
+    # so any attempt to decode would fail loudly instead of silently passing.
+    real_ffmpeg = bt.FFMPEG
+    bt.FFMPEG = "definitely-not-ffmpeg-xyz"
+    try:
+        cached = bt.audio_cache_path(os.path.join(tmp, "out"), "cached")
+        os.makedirs(os.path.dirname(cached), exist_ok=True)
+        with open(cached, "wb") as fh:
+            fh.write(b"R" * 100)
+        eq(bt.extract_audio(os.path.join(tmp, "x.mp4"), "cached",
+                            os.path.join(tmp, "out"), 10), (cached, None),
+           "an existing decode is reused without calling ffmpeg")
+
+        got, err = bt.extract_audio(os.path.join(tmp, "y.mp4"), "fresh",
+                                    os.path.join(tmp, "out"), 10)
+        eq(got, None, "no ffmpeg means no output path")
+        ok("ffmpeg not found" in (err or ""), "the error says ffmpeg is missing")
+        ok("y.mp4" in (err or ""), "the error names the input")
+    finally:
+        bt.FFMPEG = real_ffmpeg
 
 
 # ---------------------------------------------------------------- command ---
@@ -456,7 +491,7 @@ def case_integration(tmp):
     ok("0 to run, 3 already done" in log, "everything is done at the end")
 
 
-def case_non_wav_warning(tmp):
+def case_decode_notice(tmp):
     fake = os.path.join(tmp, "fake_transcribe.py")
     with open(fake, "w", encoding="utf-8") as fh:
         fh.write(FAKE_TRANSCRIBE)
@@ -466,10 +501,10 @@ def case_non_wav_warning(tmp):
     code, log = run_main(["--input", src, "--out-dir", os.path.join(tmp, "mo"),
                           "--pattern", "*.wav", "*.m4a", "--dry-run"], fake)
     eq(code, 0, "dry-run still exits 0")
-    ok("[WARN]" in log, "non-.wav match is flagged")
-    ok("b.m4a" in log, "the warning names the offending file")
-    ok("pcm_s16le" in log, "the warning shows the ffmpeg conversion")
-    ok("1 of 2" in log, "the warning counts them")
+    ok("[INFO]" in log, "a non-WAV match is announced, not rejected")
+    ok("b.m4a" in log, "the notice names the file")
+    ok("[decode]" in log, "the per-file plan marks what will be decoded")
+    ok("1 of 2" in log, "the notice counts them")
 
 
 def main():
@@ -478,7 +513,7 @@ def main():
     case_clean_key()
     case_key_for()
     case_build_cmd()
-    case_non_wav()
+    case_needs_extract()
     with tempfile.TemporaryDirectory() as tmp:
         case_walk_and_collect(tmp)
         case_collisions(tmp)
@@ -487,7 +522,8 @@ def main():
         case_summary(tmp)
         case_cli(tmp)
         case_integration(tmp)
-        case_non_wav_warning(tmp)
+        case_extract_audio(tmp)
+        case_decode_notice(tmp)
 
     print()
     print("%d assertions, %d failures." % (checks[0], len(failures)))

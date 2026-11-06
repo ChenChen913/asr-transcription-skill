@@ -99,6 +99,7 @@ def main():
                             "missing": [f for f in MODEL_FILES if f not in present]}
 
     if a.json:
+        out["problems"] = problems(out, a.models)
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
@@ -126,6 +127,38 @@ def main():
     print()
     print("Reminder: pin av<19 on faster-whisper 1.2.1; verify cublas/cudnn DLLs")
     print("are reachable before inference, not just at model load time.")
+
+    issues = problems(out, a.models)
+    if issues:
+        print()
+        print("[FAIL] %d problem(s):" % len(issues))
+        for item in issues:
+            print("  - " + item)
+        sys.exit(1)
+    print("[OK] required pieces present (this is still not a real inference)")
+
+
+def problems(out, models):
+    """What would actually stop a transcription run.
+
+    Kept separate from the printout so --json and the exit code cannot drift
+    apart. A missing GPU is deliberately NOT a problem: --device cpu is a
+    supported path. A missing OCR runtime is not a problem either - only
+    ocr_subs.py needs it, and that script says so on its own.
+    """
+    issues = []
+    for name in ("faster_whisper", "ctranslate2", "av"):
+        if not out["modules"].get(name):
+            issues.append("%s is not installed" % name)
+    if not out["ffmpeg"]:
+        issues.append("ffmpeg is not on PATH (needed to extract audio)")
+    for path in models:
+        info = out["models"].get(path) or {}
+        if not info.get("complete"):
+            issues.append("model %s is incomplete (%d/%d)%s" % (
+                path, info.get("found", 0), info.get("expected", 5),
+                " missing=" + ",".join(info["missing"]) if info.get("missing") else ""))
+    return issues
 
 
 if __name__ == "__main__":

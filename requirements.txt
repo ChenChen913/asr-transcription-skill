@@ -1,0 +1,7 @@
+# Runtime for scripts/transcribe.py (the "hearing" path).
+# Verified together on 2026-11-06: Python 3.13.14, Windows 11, CUDA 12.x.
+# av is pinned below 19 because faster-whisper 1.2.1 does not support PyAV 19.
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+av<19
+numpy>=1.24

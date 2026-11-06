@@ -27,9 +27,10 @@ Layout of --out-dir:
     _batch/summary.json        counts + per-file outcome, rewritten after every
                                file so a killed batch still leaves a record
 
-Input is PCM WAV only: duration is measured with the stdlib `wave` module, so
-`--pattern` picks file *names*, it does not add decoders. Convert other formats
-with ffmpeg first (a warning is printed for non-.wav matches).
+transcribe.py reads PCM WAV only. Any other container (.mp4/.mov/.mkv/.m4a/
+.mp3/.flac/...) is decoded first with ffmpeg into <out-dir>/_batch/audio/<key>.wav
+and reused on retry, so one ffmpeg pass per input, not per run. A WAV input is
+passed through untouched - ffmpeg is only required when a non-WAV is matched.
 
 Exit codes: 0 all ok/skipped, 1 at least one failed or timed out, 2 bad usage or
 no input matched - same spirit as qc_check.py, so a batch can gate CI.
@@ -40,6 +41,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -50,6 +52,13 @@ SUMMARY_DIR = "_batch"
 SUMMARY_NAME = "summary.json"
 BAD_CHARS = r'[<>:"|?*\\]'
 OK_STATES = ("ok", "skipped")
+
+FFMPEG = "ffmpeg"
+DECODE_EXT = {".mp4", ".mov", ".mkv", ".avi", ".flv", ".webm", ".wmv",
+              ".m4a", ".mp3", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff"}
+DEFAULT_PATTERNS = ["*.wav", "*.mp4", "*.mov", "*.mkv", "*.avi", "*.flv",
+                    "*.webm", "*.m4a", "*.mp3", "*.aac", "*.flac", "*.ogg",
+                    "*.opus", "*.wma"]
 
 
 # ---------------------------------------------------------------- planning ---
@@ -249,8 +258,16 @@ def run_one(src, out_json, key, opts):
     if not os.path.exists(src):
         rec["error"] = "input disappeared before it was processed"
         return rec
+    # Decode before stage_aside: if ffmpeg fails, the previous good pair must
+    # stay where it is. Moving it aside first would leave .prev files and no
+    # visible transcript, which reads as "the run deleted my work".
+    wav, err = extract_audio(src, key, opts["out_dir"], opts["timeout"],
+                             force=opts.get("force", False))
+    if err:
+        rec["error"] = err
+        return rec
     stage_aside(out_json)
-    cmd = build_cmd(opts["python"], opts["script"], src, out_json, key, opts)
+    cmd = build_cmd(opts["python"], opts["script"], wav, out_json, key, opts)
     started = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=opts["timeout"],
@@ -297,16 +314,57 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
-def non_wav(items):
-    """Planned inputs whose extension is not .wav.
+def needs_extract(src):
+    """True when the input is not a PCM WAV and has to be decoded first."""
+    return os.path.splitext(src)[1].lower() in DECODE_EXT
 
-    transcribe.py measures duration with the stdlib `wave` module, so anything
-    else fails there with exit 2. That check is the authority; this one only
-    exists to say so *before* the user waits through a batch. Non-blocking on
-    purpose: two gates that disagree would both need to be kept in sync.
+
+def audio_cache_path(out_dir, key):
+    return os.path.join(out_dir, SUMMARY_DIR, "audio", key + ".wav")
+
+
+def extract_audio(src, key, out_dir, timeout, force=False):
+    """Return (wav_path, error). A WAV input is returned untouched.
+
+    The decoded copy is cached under <out-dir>/_batch/audio and reused, so a
+    retry after a failed transcription does not pay for ffmpeg again. --force
+    re-decodes, because the source may have been replaced between runs.
+
+    ffmpeg is only needed when a non-WAV actually appears: a batch of WAV files
+    still runs on a machine with no ffmpeg at all (the six test suites rely on
+    that, and so do minimal installs).
     """
-    return [it["src"] for it in items
-            if os.path.splitext(it["src"])[1].lower() != ".wav"]
+    if not needs_extract(src):
+        return src, None
+    dst = audio_cache_path(out_dir, key)
+    if not force and os.path.exists(dst) and os.path.getsize(dst) > 44:
+        return dst, None
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    cmd = [FFMPEG, "-v", "error", "-y", "-i", src, "-vn",
+           "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", dst]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except FileNotFoundError:
+        return None, ("ffmpeg not found on PATH - it is needed to decode %s. "
+                      "Install ffmpeg, or convert to 16 kHz mono WAV first."
+                      % os.path.basename(src))
+    except subprocess.TimeoutExpired:
+        return None, ("ffmpeg timed out after %ss on %s"
+                      % (timeout, os.path.basename(src)))
+    except Exception as exc:
+        return None, "could not run ffmpeg: %s" % exc
+    if proc.returncode != 0:
+        msg = proc.stderr.decode("utf-8", "replace").strip()
+        return None, "ffmpeg failed (%d) on %s: %s" % (
+            proc.returncode, os.path.basename(src), tail(msg, 400))
+    if not os.path.exists(dst) or os.path.getsize(dst) <= 44:
+        return None, "ffmpeg produced no audio for %s" % os.path.basename(src)
+    return dst, None
+
+
+def planned_extract(items):
+    """Inputs that will be decoded before transcription (for the pre-run notice)."""
+    return [it["src"] for it in items if needs_extract(it["src"])]
 
 
 def counts_of(records):
@@ -367,10 +425,11 @@ def main():
     ap.add_argument("--out-dir", required=True,
                     help="where <key>.json / <key>.md go (also holds _batch/summary.json)")
     ap.add_argument("--model", default="", help="CTranslate2 model dir (required unless --dry-run)")
-    ap.add_argument("--pattern", nargs="+", default=["*.wav"],
-                    help="filename patterns, case-insensitive (default: *.wav). "
-                         "Selects names only - it does not add decoders, and "
-                         "transcribe.py reads PCM WAV only")
+    ap.add_argument("--pattern", nargs="+", default=DEFAULT_PATTERNS,
+                    help="filename patterns, case-insensitive (default: WAV plus "
+                         "common video/audio containers). Non-WAV matches are "
+                         "decoded to 16 kHz mono WAV with ffmpeg under "
+                         "<out-dir>/_batch/audio/ before transcription")
     ap.add_argument("--recursive", action="store_true", help="descend into subfolders")
     ap.add_argument("--force", action="store_true", help="re-run even if output exists")
     ap.add_argument("--dry-run", action="store_true", help="list the plan, run nothing")
@@ -411,17 +470,24 @@ def main():
         plan.append(rec)
 
     todo = [p for p in plan if p["status"] == "pending"]
-    others = non_wav(items)
-    if others:
-        print("[WARN] %d of %d matched file(s) are not .wav; transcribe.py reads "
-              "PCM WAV via the stdlib wave module, so these will fail:"
-              % (len(others), len(items)))
-        for src in others[:3]:
+    decode = planned_extract(items)
+    if decode:
+        print("[INFO] %d of %d matched file(s) are not WAV; they will be decoded "
+              "once to 16 kHz mono WAV under %s"
+              % (len(decode), len(items),
+                 os.path.join(a.out_dir, SUMMARY_DIR, "audio")))
+        for src in decode[:3]:
             print("       %s" % src)
-        if len(others) > 3:
-            print("       ... and %d more" % (len(others) - 3))
-        print("       convert first: ffmpeg -y -i X -vn -ac 1 -ar 16000 "
-              "-c:a pcm_s16le X.wav")
+        if len(decode) > 3:
+            print("       ... and %d more" % (len(decode) - 3))
+        if not shutil.which(FFMPEG):
+            if a.dry_run:
+                print("[WARN] ffmpeg is not on PATH - these files cannot be "
+                      "decoded until it is installed")
+            else:
+                print("[ERROR] ffmpeg is not on PATH - install it, or convert "
+                      "the inputs to 16 kHz mono WAV yourself")
+                sys.exit(2)
     print("inputs   : %s" % ", ".join(a.input))
     print("pattern  : %s%s" % (" ".join(a.pattern),
                                "  (recursive)" if a.recursive else ""))
@@ -431,14 +497,16 @@ def main():
     if a.dry_run:
         for p in plan:
             mark = "skip" if p["status"] == "skipped" else "run "
-            print("  %s  %-40s -> %s" % (mark, p["src"],
-                                         os.path.basename(p["out_json"])))
+            note = "  [decode]" if needs_extract(p["src"]) else ""
+            print("  %s  %-40s -> %s%s" % (mark, p["src"],
+                                           os.path.basename(p["out_json"]), note))
         print("dry run: nothing executed.")
         return
 
     opts = {"model": a.model, "device": a.device, "compute": a.compute,
             "language": a.language, "timeout": a.timeout,
-            "python": sys.executable, "script": TRANSCRIBE}
+            "python": sys.executable, "script": TRANSCRIBE,
+            "out_dir": a.out_dir, "force": a.force}
     meta = {"started_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "finished_at": None,
             "model": os.path.basename(a.model.rstrip("/\\")), "device": a.device,
             "compute": a.compute, "language": a.language, "pattern": a.pattern,

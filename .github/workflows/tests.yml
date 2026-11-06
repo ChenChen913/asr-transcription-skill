@@ -1,0 +1,34 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  offline-suites:
+    # Pinned to Windows on purpose: it is the only platform the scripts claim
+    # to support, and the suites encode Windows path rules. A green Linux run
+    # would prove less than it looks like.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Syntax check
+        run: python -m compileall -q scripts tests
+
+      # No pip install, no model, no GPU, no network: that is the point of
+      # these six suites. check_env.py is not run because a CI box has no GPU
+      # and no model, so exit 1 there would be correct but useless.
+      - name: Offline suites
+        run: |
+          python tests/run_smoke.py
+          python tests/run_transcribe_unit.py
+          python tests/run_subs_unit.py
+          python tests/run_batch_unit.py
+          python tests/run_ocr_unit.py
+          python tests/run_merge_unit.py

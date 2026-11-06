@@ -1,0 +1,5 @@
+# Optional: only scripts/ocr_subs.py needs these (the "seeing" path).
+# rapidocr 2.x changed its result schema, so the 1.x line is pinned on purpose.
+-r requirements.txt
+rapidocr-onnxruntime==1.2.3
+onnxruntime==1.24.2

@@ -6,10 +6,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1381%20offline%20assertions-brightgreen.svg" alt="1381 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1393%20offline%20assertions-brightgreen.svg" alt="1393 offline assertions">
 </p>
 
-给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1381 条离线断言。
+给 Agent 加载的中文音视频转写技能包：**听**（语音转写）+ **看**（字幕轨抽取 / 画面 OCR）+ **互相校验**，附 1393 条离线断言。
 
 > [!NOTE]
 > 本仓库由 AI 辅助开发，脚本与数字都经人工实测复核，过程记录在 [`ROADMAP.md`](ROADMAP.md)。未验证的平台不写成「已支持」，见[已知限制](#已知限制)。
@@ -132,13 +132,32 @@ python scripts/qc_check.py "out/01.json"
 ```powershell
 git clone https://github.com/ChenChen913/asr-transcription-skill.git "$env:USERPROFILE\.workbuddy\skills\asr-transcription"
 cd "$env:USERPROFILE\.workbuddy\skills\asr-transcription"
-python -m pip install "faster-whisper==1.2.1" "ctranslate2==4.8.1" "av<19"
+python -m pip install -r requirements.txt          # 听：faster-whisper / CTranslate2 / av
+python -m pip install -r requirements-ocr.txt      # 看：仅 ocr_subs.py 需要，可跳过
 ```
 
-装完先自检。`check_env.py` 只读，不写文件；`run_smoke.py` 不需要模型、GPU 或网络：
+版本都锁在文件里（`faster-whisper==1.2.1`、`ctranslate2==4.8.1`、`av<19`；OCR 侧 `rapidocr-onnxruntime==1.2.3`、`onnxruntime==1.24.2`，因为 rapidocr 2.x 改了返回结构）。
+
+### 下载模型
+
+两个模型都只放本地目录，`--model` 指向该目录即可。
 
 ```powershell
-python scripts/check_env.py --models "<模型目录>"
+python -m pip install huggingface_hub
+# 国内网络先设镜像：$env:HF_ENDPOINT = "https://hf-mirror.com"
+
+hf download mobiuslabsgmbh/faster-whisper-large-v3-turbo `
+  --local-dir D:\hf-models\faster-whisper-large-v3-turbo     # 1.51 GiB，主力
+hf download Systran/faster-whisper-large-v3 `
+  --local-dir D:\hf-models\faster-whisper-large-v3           # 2.88 GiB，疑难复核，可不下
+```
+
+> `hf` 是 huggingface_hub 1.x 的命令；0.x 里叫 `huggingface-cli download`，参数相同。turbo 的 CTranslate2 转换版由 `mobiuslabsgmbh/faster-whisper-large-v3-turbo` 提供，这是 faster-whisper 官方登记的仓库名；社区版 `deepdml/faster-whisper-large-v3-turbo-ct2` 也可用，但不是同一个来源。
+
+装完先自检。`check_env.py` 只读，不写文件；**发现缺依赖、缺 ffmpeg 或模型不全时退出码为 1**，可以直接当门禁用。`run_smoke.py` 不需要模型、GPU 或网络：
+
+```powershell
+python scripts/check_env.py --models "D:\hf-models\faster-whisper-large-v3-turbo"
 python tests/run_smoke.py
 ```
 
@@ -201,7 +220,7 @@ python scripts/extract_subs.py --input "01.mp4" --out-dir "out" --lang zh
 字幕已经烧进像素、又没有文本字幕轨时走这一步。要先装 OCR 运行时（约 13 MB 模型随 wheel 一起装，不用另外下载）：
 
 ```text
-python -m pip install rapidocr_onnxruntime onnxruntime
+python -m pip install -r requirements-ocr.txt
 ```
 
 ```text
@@ -253,7 +272,7 @@ python scripts/transcribe.py `
 
 ### 批量转写
 
-一个文件夹，或者多个：
+一个文件夹，或者多个。**视频不用先手工转 WAV**：匹配到的 `.mp4/.mov/.mkv/.m4a/.mp3/.flac` 等会先用 ffmpeg 解成 16 kHz 单声道 WAV，缓存在 `_batch/audio/`，重跑复用、`--force` 才重抽；纯 WAV 输入则完全不碰 ffmpeg，所以没有 ffmpeg 的机器照样能批处理 WAV。
 
 ```powershell
 # 先看计划：不加载模型，不写文件
@@ -278,15 +297,16 @@ out/
 ├── <key>.md            同名可读稿
 ├── <key>.json.prev     只有重跑中或重跑失败时才存在，不算完成
 ├── <key>.md.prev
-└── _batch/summary.json 计数 + 每文件结果，每处理完一个就落盘
+├── _batch/summary.json 计数 + 每文件结果，每处理完一个就落盘
+└── _batch/audio/       非 WAV 输入的 16 kHz 单声道解码副本，重跑复用
 ```
 
 两个容易踩的点：
 
 - **`json` 与 `md` 是一组**。跳过判据要求两份都完整，`--force` 也把两份一起改名成 `.prev`。写入端先改名 MD、后改名 JSON，所以「有 JSON ⇒ 有 MD」，被 kill 在半路的任务下一轮会补跑，不会被永久跳过。
-- **只吃 PCM WAV**。`--pattern` 只筛文件名，不增加解码能力。匹配到非 `.wav` 时，开跑前打印 `[WARN]` 与一句 FFmpeg 转换命令，但不阻断——真正的解码错误由 `transcribe.py` 报。
+- **非 WAV 会自动解码**。匹配到的 `.mp4/.mov/.mkv/.m4a/.mp3/.flac` 等先用 ffmpeg 转成 16 kHz 单声道 WAV，放在 `_batch/audio/`，重跑复用（`--force` 重抽）。纯 WAV 批次完全不调用 ffmpeg；匹配到非 WAV 但 PATH 里没有 ffmpeg 时，开跑前就以退出码 2 停下，不会逐个文件失败。
 
-退出码：`0` 全部成功｜`1` 有失败或超时｜`2` 用法或匹配错误。
+退出码：`0` 全部成功｜`1` 有失败或超时｜`2` 用法错误、无匹配，或匹配到非 WAV 但缺 ffmpeg。
 
 ### 质检
 
@@ -431,7 +451,7 @@ python scripts/merge_sources.py --heard "out/01.json" --seen "out/01-ocr.json" -
 | `--input` | 必填 | 一个或多个目录，也可显式给文件 |
 | `--out-dir` | 必填 | 产物目录，`_batch/summary.json` 也在这里 |
 | `--model` | 空 | `--dry-run` 时可省 |
-| `--pattern` | `*.wav` | 文件名模式，大小写不敏感；只筛名字，不加解码器 |
+| `--pattern` | WAV + 常见视频/音频容器 | 文件名模式，大小写不敏感；非 WAV 命中项自动用 ffmpeg 解码，缺 ffmpeg 时开跑前退出并提示 |
 | `--recursive` | 关 | 递归子目录 |
 | `--force` | 关 | 忽略已有产物重跑 |
 | `--dry-run` | 关 | 只打印计划 |
@@ -477,7 +497,7 @@ asr-transcription/
 │   ├── batch_transcribe.py   # 串行批处理
 │   ├── qc_check.py           # 输入校验 + 四项粗筛 + 三查
 │   └── check_env.py          # 只读环境自检
-├── tests/                    # 六套零依赖测试，共 1381 条断言
+├── tests/                    # 六套零依赖测试，共 1393 条断言
 └── docs/
     ├── 转写经验_通用版.md      # 未拆分的完整原文；与 references 冲突时以 references 为准
     ├── 字幕识别与OCR_调研与设计.md  # 三条通路与实测数据；字幕轨 → v0.6，硬字幕 → v0.7
@@ -577,6 +597,8 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 - **只有段级时间戳**。没有词级 `words`，没有说话人分离，不能直接导出 SRT / VTT（字幕轨抽取产出的 `.srt` 是源文件自带的，不是转写生成的）。
 - **"看"的能力分两级，都有边界**。有文本字幕轨或外挂 `.srt/.ass/.ssa/.vtt` 时 `extract_subs.py` 零推理直接抽（`engine=subtitle-track`）；没有就走 `ocr_subs.py` 逐帧 OCR（`engine=ocr`）。**图形字幕轨（PGS/VobSub/DVB）、竖排、花字、被遮挡的字仍然读不了**；OCR 只读画面下半幅，字幕在顶部就找不到。压在字幕**同一行**上的叠字也分不开——按纵向位置切只能分开不同行，分不开同一行里的两段文字；能被分开的是"另起一行、换得比口播慢"的那类固定文案（要点条、章节点、流程图），按变化节奏剔除，6 条素材共剔除 50 段；但逐帧都在变的图表仍会残留（25 条里 7 条）。它比转写慢（约 0.38 秒一帧），且需要额外装 OCR 运行时——没装时该脚本明确报错退出，另外五个脚本不受影响。
 - **字号太小就读不准**。640×360 这类素材上一行字只有十几像素，同一条字幕在两种留白下会读出不同结果（实测一致率 0.815）；它的产物仍然可用，但错字率明显高于竖屏 720p/1080p。
+- **听对英文专名几乎没有抵抗力**。25 条中文面试视频里 `RAG` 被听成 `RIG` / `REG` **32 次**，`DeepSeek`、`LangChain`、`Claude` **一次都没写对**；同一批素材的 OCR 分别对 6 / 6 / 4 次。英文缩写必须靠"看"或术语表回填，只交 ASR 稿一定会错。
+- **快语速中英混读会整段消失**。实测一条 **17.66 秒**的口播一个字没转出，音量正常（−18.2 dB，与前后一致）、关掉 VAD 重跑仍读不出，而画面上这段有字幕。只有 `qc_check.py` 的 LONG GAP 能自动发现它——长间隙必须回听，不是可选项。
 - **互校只对齐，不裁决**。`merge_sources.py` 给出"哪几段两边不一致"，谁对谁错要回到音频和画面判断。它不产出合并稿，也不自动改任何一边。
 - **单文件失败不落盘**。直接调 `transcribe.py` 失败时没有产物，只能靠退出码判断。批量场景已覆盖（`_batch/summary.json` 记退出码与错误尾部），单文件场景仍是 `ROADMAP.md` 的 C4。
 - **不报准确率**。没有人工标准答案就不报，这是硬规则，不是谦虚。
