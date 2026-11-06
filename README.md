@@ -6,20 +6,22 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1028%20offline%20assertions-brightgreen.svg" alt="1028 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1222%20offline%20assertions-brightgreen.svg" alt="1222 offline assertions">
 </p>
 
-给 Agent 加载的中文音视频转写技能包：选型、参数、质检脚本与第三方归属，附 1028 条离线断言。
+给 Agent 加载的中文音视频转写技能包：选型、参数、质检脚本与第三方归属，附 1222 条离线断言。
 
 > [!NOTE]
 > 本仓库由 AI 辅助开发，脚本与数字都经人工实测复核，过程记录在 [`ROADMAP.md`](ROADMAP.md)。未验证的平台不写成「已支持」，见[已知限制](#已知限制)。
 
 ```mermaid
 flowchart LR
-    A["素材 mp4 / mkv"] -->|FFmpeg| B["16 kHz 单声道 WAV"]
+    A["素材 mp4 / mkv"] -->|"先探字幕轨"| S["extract_subs.py<br/>外挂 srt / 内嵌文本轨"]
+    A -->|FFmpeg| B["16 kHz 单声道 WAV"]
+    S -->|抽到| D["out/01.json + out/01.md"]
     B --> C["transcribe.py<br/>faster-whisper turbo · GPU"]
     C -->|"错误确属 CUDA"| C2["回退 CPU int8"]
-    C --> D["out/01.json + out/01.md"]
+    C --> D
     C2 --> D
     D --> E["qc_check.py<br/>ERROR / REVIEW"]
     E --> F["人工三查<br/>开头 30 s · 结尾 30 s · 长间隙"]
@@ -86,7 +88,7 @@ python scripts/qc_check.py "out/01.json"
 | 模型 | 一个 CTranslate2 目录，含 5 个文件：`config.json` / `model.bin` / `preprocessor_config.json` / `tokenizer.json` / `vocabulary.json` |
 | 磁盘 | turbo 约 1.51 GiB、large-v3 约 2.88 GiB |
 
-模型权重**不在本仓库**，需要自己下载（Hugging Face 或镜像）。没有模型时，`check_env.py` 与三套测试仍可运行。
+模型权重**不在本仓库**，需要自己下载（Hugging Face 或镜像）。没有模型时，`check_env.py` 与四套测试仍可运行。
 
 ### 安装
 
@@ -120,7 +122,7 @@ python scripts/qc_check.py "out/01.json"
 
 ### 不想用 Skill 机制
 
-四个脚本是普通 Python 3 程序。把仓库放在任意目录，直接 `python scripts/transcribe.py ...` 就能用，不需要 Agent 运行时。
+五个脚本是普通 Python 3 程序。把仓库放在任意目录，直接 `python scripts/transcribe.py ...` 就能用，不需要 Agent 运行时。
 
 想在其他 Agent 工具里按 Skill 加载，按各自文档规定的目录与元数据放置。**本仓库只实测过 WorkBuddy 用户级 Skill，不声称对其他工具已兼容。**
 
@@ -131,14 +133,29 @@ python scripts/qc_check.py "out/01.json"
 | 环节 | 归属 | 载体 |
 |---|---|---|
 | 环境自检 | 已自动化 | `scripts/check_env.py` |
+| 字幕轨抽取 | 已自动化 | `scripts/extract_subs.py` |
 | 单条转写 | 已自动化 | `scripts/transcribe.py` |
 | 批量转写 | 已自动化 | `scripts/batch_transcribe.py` |
 | 结果质检 | 已自动化 | `scripts/qc_check.py` |
-| 回归测试 | 已自动化 | `tests/` 下三套 |
+| 回归测试 | 已自动化 | `tests/` 下四套 |
 | 抽音频、异源对照、差异对齐、精编、留痕 | Agent 工作流 | Skill 指导 Agent 调命令、判读结果；没有对应脚本 |
 | 首末段回听、建术语表、提供标准答案、商用许可核对 | 手动 | 需要人工判断 |
 
 > 「文档写了完整流程」不等于「工具已经实现」。SenseVoice q8 GGUF 只有命令、没有封装脚本，是可选的独立对照方案。
+
+### 字幕轨抽取
+
+素材自带字幕时先走这一步：不推理、不加载模型，几秒钟出稿。
+
+```powershell
+python scripts/extract_subs.py --input "01.mp4" --out-dir "out" --list   # 只列轨，不抽
+python scripts/extract_subs.py --input "01.mp4" --out-dir "out"          # 外挂 srt 优先，其次内嵌文本轨
+python scripts/extract_subs.py --input "01.mp4" --out-dir "out" --lang zh
+```
+
+产物与转写**同 schema**（`out/01.json` + `out/01.md`），另存一份 `out/01.srt`，JSON 里 `"engine": "subtitle-track"`。只认**文本**轨：PGS / VobSub 这类图形轨会明确拒绝并提示需要 OCR，烧进画面的硬字幕不在此列。它会连容器时长一起 probe，所以外挂字幕只覆盖部分时长时不会把视频时长报短。退出码 `3` 表示一份都没抽出来，此时照常转写。
+
+> 字幕是字幕，不是逐字稿：作者会省语气词、合并长句、自带断句。产物 MD 头部写明这一点，`qc_check.py` 也会跳过字/段密度两条警告——但重叠、长间隙、片尾话术照旧检查。
 
 ### 单条转写
 
@@ -250,6 +267,21 @@ python scripts/qc_check.py "out/*.json" --json      # 严格 JSON，可进 CI
 
 本仓库**没有配置文件，也没有 API key 或账号**。所有参数走命令行。脚本唯一读取的环境变量是 `PATH`（`transcribe.py` 用它找 CUDA DLL 目录）。
 
+### extract_subs.py
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--input` | 必填 | 一个或多个媒体文件 / 目录 |
+| `--out-dir` | 必填 | 产物目录（`<key>.json` / `.md` / `.srt`） |
+| `--stream` | 自动 | 取第 N 条字幕流（从 0 数，按人眼顺序） |
+| `--lang` | 自动 | 只接受该语言的文本轨；找不到就拒绝，**不静默换轨** |
+| `--no-sidecar` | 关 | 忽略同目录同名 `.srt/.ass/.ssa/.vtt` |
+| `--recursive` | 关 | 递归子目录 |
+| `--list` | 关 | 只列字幕轨，不抽 |
+| `--force` | 关 | 已有产物也重抽 |
+| `--timeout` | `120` | 单次 ffmpeg / ffprobe 超时，秒 |
+| `--ffmpeg` / `--ffprobe` | PATH | 指定可执行文件 |
+
 ### transcribe.py
 
 | 参数 | 默认 | 说明 |
@@ -315,14 +347,15 @@ asr-transcription/
 │   ├── 09-attribution.md     # 第三方归属（本文表格的完整版）
 │   └── 10-commands.md        # 命令速查（bash + PowerShell）
 ├── scripts/
+│   ├── extract_subs.py       # 抽文本字幕轨，产出同 schema 的 JSON + MD
 │   ├── transcribe.py         # 转写，产出 JSON + MD
 │   ├── batch_transcribe.py   # 串行批处理
 │   ├── qc_check.py           # 输入校验 + 四项粗筛 + 三查
 │   └── check_env.py          # 只读环境自检
-├── tests/                    # 三套零依赖测试，共 1028 条断言
+├── tests/                    # 四套零依赖测试，共 1222 条断言
 └── docs/
     ├── 转写经验_通用版.md      # 未拆分的完整原文；与 references 冲突时以 references 为准
-    ├── 字幕识别与OCR_调研与设计.md  # 未实施的设计方案：三条通路、实测数据、红线冲突
+    ├── 字幕识别与OCR_调研与设计.md  # 三条通路与实测数据；字幕轨部分已落地为 v0.6
     └── 参考项目评估_native-subtitle-quote-image.md  # 上游项目可移植技术评估（字幕带定位、帧差异度）
 ```
 
@@ -334,20 +367,22 @@ asr-transcription/
 
 ```powershell
 python -m compileall -q scripts tests
-python tests/run_smoke.py            # 质检契约：33 类输入 × 文本/JSON
+python tests/run_smoke.py            # 质检契约：36 类输入 × 文本/JSON
 python tests/run_transcribe_unit.py  # 回退决策、耗时口径、产物原子写入
 python tests/run_batch_unit.py       # 批处理规划、跳过判据、端到端集成
+python tests/run_subs_unit.py        # 字幕解析、选轨、外挂回落
 ```
 
 实跑结果（2026-11-06）：
 
 ```text
-33 cases x (text + --json), 883 assertions, 0 failures.
+36 cases x (text + --json), 998 assertions, 0 failures.
 43 assertions, 0 failures.
 102 assertions, 0 failures.
+79 assertions, 0 failures.
 ```
 
-三套都不需要网络、模型、GPU 或 ffmpeg。批处理的端到端用例用一个假 `transcribe.py` 驱动 `main()`，覆盖成功、失败、跳过、修复后重试、半成品产物。
+四套都不需要网络、模型、GPU 或 ffmpeg。批处理的端到端用例用一个假 `transcribe.py` 驱动 `main()`，覆盖成功、失败、跳过、修复后重试、半成品产物；字幕单测把 `ffprobe` 指向不存在的程序，验证外挂字幕在无探针时仍能成稿。
 
 ### Windows 上的「假绿」陷阱
 
@@ -410,8 +445,8 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 
 ### 能力边界
 
-- **只有段级时间戳**。没有词级 `words`，没有说话人分离，不能直接导出 SRT / VTT。
-- **不支持字幕识别**。既不能抽字幕轨，也不能对画面做 OCR；视频一律只按音轨转写。调研结论、实测数据与实施方案见 [`docs/字幕识别与OCR_调研与设计.md`](docs/字幕识别与OCR_调研与设计.md)——**尚未实施**。
+- **只有段级时间戳**。没有词级 `words`，没有说话人分离，不能直接导出 SRT / VTT（字幕轨抽取产出的 `.srt` 是源文件自带的，不是转写生成的）。
+- **只抽文本字幕轨，不做画面 OCR**。有外挂 `.srt/.ass/.ssa/.vtt` 或内嵌文本字幕轨时 `extract_subs.py` 直接抽（零推理、`engine=subtitle-track`）；**图形字幕轨（PGS/VobSub/DVB）与烧进画面的硬字幕不支持**——前者会被明确拒绝并提示需要 OCR，后者仍在设计阶段，见 [`docs/字幕识别与OCR_调研与设计.md`](docs/字幕识别与OCR_调研与设计.md)。
 - **单文件失败不落盘**。直接调 `transcribe.py` 失败时没有产物，只能靠退出码判断。批量场景已覆盖（`_batch/summary.json` 记退出码与错误尾部），单文件场景仍是 `ROADMAP.md` 的 C4。
 - **不报准确率**。没有人工标准答案就不报，这是硬规则，不是谦虚。
 - **SenseVoice 只当第二意见**。它输出没有可用时间戳，中英混读的专名明显弱于主力，不能单独出正式稿。
@@ -488,7 +523,7 @@ A：不支持直接喂。先 `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16l
 
 - **报问题、提需求**：到 [Issues](https://github.com/ChenChen913/asr-transcription-skill/issues)。请附命令、退出码、错误原文，以及 `check_env.py` 的输出（去掉本机路径）。
 - **PR**：欢迎，但没有固定流程，也不保证及时处理。改动前先开 Issue 说清要解决什么，避免大改被拒。
-- **提交前**：三套测试全绿，并在清空 `PYTHONUTF8` / `PYTHONIOENCODING` 的环境复跑一遍（见[开发](#开发)）。
+- **提交前**：四套测试全绿，并在清空 `PYTHONUTF8` / `PYTHONIOENCODING` 的环境复跑一遍（见[开发](#开发)）。
 - **不要提交**：模型权重、音频素材、逐字稿、凭据、本机绝对路径。
 - **不要为了接更多模型而加功能**。这个仓库的目标是转写质量与可靠工作流，不是模型数量。
 

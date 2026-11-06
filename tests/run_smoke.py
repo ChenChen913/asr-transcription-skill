@@ -168,6 +168,25 @@ CASES = [
       "segments": [seg(0, 30, "今天我们讲讲订阅这个词的用法，内容比较长。"),
                    seg(30, 59, "后面还有很多正常的内容要继续讲下去。")]},
      0, "OK", [], ["head prompt echo"]),
+
+    # ---- source-aware baseline: subtitle tracks are condensed, not verbatim ----
+    # The three cases below only make sense together: the first proves the
+    # density rule still fires for ASR, the second that it is off for subtitle
+    # tracks, the third that switching it off did not disable overlap review.
+    ("asr_low_density_still_warns", "density rule still applies to ASR output",
+     {"duration": 60, "timestamps": True,
+      "segments": [seg(i * 9.0, i * 9.0 + 7.0, "短句。") for i in range(6)]},
+     0, "OK", ["char density"], []),
+    ("subtitle_track_no_density_warn",
+     "subtitle wording is condensed; density warnings must not fire",
+     {"duration": 60, "timestamps": True, "engine": "subtitle-track",
+      "segments": [seg(i * 9.0, i * 9.0 + 7.0, "短句。") for i in range(6)]},
+     0, "OK", [], ["char density", "check split style"]),
+    ("subtitle_track_overlap_still_review",
+     "skipping density must not disable overlap detection",
+     {"duration": 60, "timestamps": True, "engine": "subtitle-track",
+      "segments": [seg(0, 10, "第一句。"), seg(9, 20, "第二句。")]},
+     1, "REVIEW", ["overlapping segments"], ["char density"]),
 ]
 
 
@@ -273,6 +292,12 @@ def main():
                         assert_that(row.get("status") == exp_status,
                                     "%s status=%r expected=%r"
                                     % (tag, row.get("status"), exp_status))
+                        assert_that("source" in row,
+                                    "%s source key missing" % tag)
+                        if name.startswith("subtitle_track"):
+                            assert_that(row.get("source") == "subtitle-track",
+                                        "%s source=%r expected subtitle-track"
+                                        % (tag, row.get("source")))
                         for k in LEGACY_KEYS + NEW_KEYS:
                             assert_that(k in row, "%s legacy/new key %r lost" % (tag, k))
                         if exp_status == "ERROR":

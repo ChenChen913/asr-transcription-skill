@@ -28,6 +28,17 @@ cd "<可执行文件目录>" && ./<exe> -m <模型.gguf> --vad <vad.gguf> -a "<�
 
 > 交付时建议同时产出：逐次结果表（CSV）、汇总报告（MD）、原始输出目录、以及一份「数据出处」清单，把每个数字钉到具体文件或命令。
 
+### 先看有没有字幕轨（省掉一整轮转写）
+
+```bash
+python scripts/extract_subs.py --input "<素材>" --out-dir "out" --list   # 只列轨，不抽
+python scripts/extract_subs.py --input "<素材>" --out-dir "out"          # 外挂 srt 优先，其次内嵌文本轨
+python scripts/extract_subs.py --input "<素材>" --out-dir "out" --lang zh
+python scripts/extract_subs.py --input "素材A" "素材B" --out-dir "out" --recursive
+```
+
+> 只处理**文本**字幕轨（subrip/ass/mov_text/webvtt 等）；PGS/VobSub 这类图形轨会明确拒绝并提示需要 OCR。退出码 `0` 抽到了、`2` 参数/输入有问题、`3` 一份都没抽出来（此时照常转写）。产物是同样的 `<key>.json` + `<key>.md`，外加一份 `<key>.srt` 原始字幕留档；JSON 里 `"engine": "subtitle-track"`，`qc_check.py` 会据此跳过字/段密度警告。
+
 ### 用 Skill 自带脚本跑一条
 
 ```bash

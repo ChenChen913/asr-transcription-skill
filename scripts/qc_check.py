@@ -39,6 +39,15 @@ note "INVALID TIMELINE" and all three time metrics null, while text-derived
 metrics (chars / punct_per_100 / chars_per_min) remain valid. --json output is
 always strict JSON (non-finite values are emitted as null, never NaN/Infinity).
 
+Two producer baselines. Files carrying "engine": "subtitle-track" were written
+by scripts/extract_subs.py from a real subtitle track, not by ASR. Subtitle
+wording is condensed on purpose, so chars/min and segments/min sit well below
+the ASR bands; only those two density warnings are skipped for them, and the
+report says "source": "subtitle-track". Every other check - overlaps, long
+gaps, tail, prompt echoes - is source-independent and still runs. Density is
+skipped, not relaxed: inventing a second numeric band would imply a precision
+no measurement here supports.
+
 Inputs WITHOUT real timestamps (single placeholder segment covering the whole
 audio, or "timestamps": false) are flagged: tail/gap metrics are N/A.
 
@@ -107,9 +116,15 @@ def brief(v, limit=40):
 
 
 def blank_row(name, msg):
-    """A fatal/error row that still carries every legacy key."""
+    """A fatal/error row that still carries every legacy key.
+
+    "source" is "unknown" here rather than "asr": these rows are produced
+    before (or instead of) a successful parse, so claiming a producer would be
+    a guess. The key still exists, so JSON consumers never need a branch.
+    """
     return {
         "file": name, "status": "ERROR", "error": msg, "errors": [msg],
+        "source": "unknown",
         "red": [], "warn": [], "note": "",
         "duration": None, "chars": 0, "segments": 0,
         "punct_per_100": 0.0, "chars_per_min": 0.0, "segs_per_min": 0.0,
@@ -247,6 +262,16 @@ def check(path, gap_limit, tail_limit):
         return result_with_errors(os.path.basename(path),
                                   errors or ["no usable segments"])
 
+    # Two producers, two baselines. A subtitle track is not a verbatim
+    # transcript: it drops filler words, merges speech into reading-sized cues
+    # and arrives with its own punctuation, so chars/min and segments/min land
+    # far below the ASR bands. Measuring it with the ASR ruler flags every
+    # single subtitle file, and an always-on warning teaches people to ignore
+    # warnings. Only the density pair is skipped - overlaps, gaps, tail and
+    # prompt echoes are source-independent and still apply.
+    source = str(d.get("engine") or "asr")
+    is_subs = source == "subtitle-track"
+
     text = "".join(s["t"] for s in segs)
     norm = unicodedata.normalize("NFKC", text)
     minutes = dur / 60.0 if dur_ok else 0
@@ -320,9 +345,10 @@ def check(path, gap_limit, tail_limit):
 
     cpm = len(norm) / minutes if minutes else 0
     spm = len(segs) / minutes if minutes else 0
-    if dur_ok and not (DEFAULT_CPM[0] <= cpm <= DEFAULT_CPM[1]):
+    if dur_ok and not is_subs and not (DEFAULT_CPM[0] <= cpm <= DEFAULT_CPM[1]):
         warn.append("char density %.1f/min outside %s" % (cpm, DEFAULT_CPM))
-    if time_ok and not no_ts and not (DEFAULT_SPM[0] <= spm <= DEFAULT_SPM[1]):
+    if (time_ok and not no_ts and not is_subs
+            and not (DEFAULT_SPM[0] <= spm <= DEFAULT_SPM[1])):
         warn.append("segments %.1f/min outside %s (check split style)"
                     % (spm, DEFAULT_SPM))
 
@@ -337,6 +363,7 @@ def check(path, gap_limit, tail_limit):
         note = ""
     return {
         "file": os.path.basename(path), "status": status,
+        "source": source,
         "error": "; ".join(errors) if errors else None,   # legacy key
         "errors": errors, "red": red, "warn": warn,
         "duration": round(dur, 2) if dur_ok else None,

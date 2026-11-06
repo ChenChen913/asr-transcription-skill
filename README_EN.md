@@ -6,20 +6,22 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13.x-3776ab.svg" alt="Python 3.13.x"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20verified-lightgrey.svg" alt="Platform: Windows 11, verified">
-  <img src="https://img.shields.io/badge/tests-1028%20offline%20assertions-brightgreen.svg" alt="1028 offline assertions">
+  <img src="https://img.shields.io/badge/tests-1222%20offline%20assertions-brightgreen.svg" alt="1222 offline assertions">
 </p>
 
-An agent-loadable Chinese ASR skill: engine choice, parameters, QC scripts, attribution, 1028 offline assertions.
+An agent-loadable Chinese ASR skill: engine choice, parameters, QC scripts, attribution, 1222 offline assertions.
 
 > [!NOTE]
 > This repository is AI-assisted. Every script and number has been verified by hand, and the process is recorded in [`ROADMAP.md`](ROADMAP.md). Platforms that were not tested are never described as supported — see [Known limitations](#known-limitations).
 
 ```mermaid
 flowchart LR
-    A["mp4 / mkv source"] -->|FFmpeg| B["16 kHz mono WAV"]
+    A["mp4 / mkv source"] -->|"check subtitle tracks first"| S["extract_subs.py<br/>sidecar srt / embedded text track"]
+    A -->|FFmpeg| B["16 kHz mono WAV"]
+    S -->|found| D["out/01.json + out/01.md"]
     B --> C["transcribe.py<br/>faster-whisper turbo · GPU"]
     C -->|"error is genuinely CUDA"| C2["fall back to CPU int8"]
-    C --> D["out/01.json + out/01.md"]
+    C --> D
     C2 --> D
     D --> E["qc_check.py<br/>ERROR / REVIEW"]
     E --> F["manual checks<br/>first 30 s · last 30 s · long gaps"]
@@ -86,7 +88,7 @@ What it is not: it does not train models, publish weights, run a cloud service, 
 | Model | A CTranslate2 directory with 5 files: `config.json` / `model.bin` / `preprocessor_config.json` / `tokenizer.json` / `vocabulary.json` |
 | Disk | turbo about 1.51 GiB, large-v3 about 2.88 GiB |
 
-Model weights are **not** in this repository; download them yourself (Hugging Face or a mirror). Without a model, `check_env.py` and all three test suites still run.
+Model weights are **not** in this repository; download them yourself (Hugging Face or a mirror). Without a model, `check_env.py` and all four test suites still run.
 
 ### Install
 
@@ -120,7 +122,7 @@ Look at three things afterwards: `out/01.json` (structured), `out/01.md` (timest
 
 ### Without the Skill mechanism
 
-The four scripts are plain Python 3. Put the repository anywhere and call `python scripts/transcribe.py ...`; no agent runtime required.
+The five scripts are plain Python 3. Put the repository anywhere and call `python scripts/transcribe.py ...`; no agent runtime required.
 
 To load it as a Skill in another agent tool, follow that tool's documented directory and metadata conventions. **Only the WorkBuddy user-level Skill path has been tested here; this repository does not claim compatibility with other tools.**
 
@@ -131,14 +133,29 @@ To load it as a Skill in another agent tool, follow that tool's documented direc
 | Step | Owner | Where |
 |---|---|---|
 | Environment check | Automated | `scripts/check_env.py` |
+| Subtitle track extraction | Automated | `scripts/extract_subs.py` |
 | Single-file transcription | Automated | `scripts/transcribe.py` |
 | Batch transcription | Automated | `scripts/batch_transcribe.py` |
 | Transcript QC | Automated | `scripts/qc_check.py` |
-| Regression tests | Automated | the three suites under `tests/` |
+| Regression tests | Automated | the four suites under `tests/` |
 | Audio extraction, cross-engine comparison, diff alignment, editing, record keeping | Agent workflow | The Skill tells the agent which command to run and how to read the result; no script |
 | Listening to first/last 30 s, glossary, reference transcript, licence review | Manual | Requires human judgement |
 
 > "The workflow is documented" does not mean "the tool implements it". SenseVoice q8 GGUF has commands but no wrapper script; it is an optional independent comparison.
+
+### Subtitle track extraction
+
+When the source already carries subtitles, start here: no inference, no model load, seconds per file.
+
+```powershell
+python scripts/extract_subs.py --input "01.mp4" --out-dir "out" --list   # list tracks only
+python scripts/extract_subs.py --input "01.mp4" --out-dir "out"          # sidecar srt first, then embedded text track
+python scripts/extract_subs.py --input "01.mp4" --out-dir "out" --lang zh
+```
+
+The output uses the **same schema** as transcription (`out/01.json` + `out/01.md`), plus `out/01.srt` as an archival copy; the JSON carries `"engine": "subtitle-track"`. Only **text** tracks are handled: PGS / VobSub and friends are refused with an explicit "needs OCR" message, and burned-in subtitles are out of scope. The container duration is probed even on the sidecar path, so a partial sidecar cannot report the video as shorter than it is. Exit code `3` means nothing was extracted — proceed with transcription.
+
+> A subtitle is not a verbatim transcript: authors drop filler words, merge sentences and bring their own punctuation. The MD header says so, and `qc_check.py` skips the character/segment density warnings for this source — overlaps, long gaps and closing phrases are still checked.
 
 ### Single file
 
@@ -250,6 +267,21 @@ A negative "tail gap" is not a pass; it means hallucinated segments were added. 
 
 There is **no config file, no API key, and no account**. Every parameter is a CLI flag. The only environment variable the scripts read is `PATH` (`transcribe.py` uses it to locate CUDA DLL directories).
 
+### extract_subs.py
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--input` | required | One or more media files / directories |
+| `--out-dir` | required | Output directory (`<key>.json` / `.md` / `.srt`) |
+| `--stream` | auto | Take the N-th subtitle stream (0-based, as a human counts) |
+| `--lang` | auto | Accept only a text track in this language; refuse rather than switch silently |
+| `--no-sidecar` | off | Ignore a same-stem `.srt/.ass/.ssa/.vtt` |
+| `--recursive` | off | Descend into subdirectories |
+| `--list` | off | List tracks, extract nothing |
+| `--force` | off | Re-extract even if output exists |
+| `--timeout` | `120` | Per ffmpeg / ffprobe call, seconds |
+| `--ffmpeg` / `--ffprobe` | PATH | Explicit binaries |
+
 ### transcribe.py
 
 | Flag | Default | Meaning |
@@ -315,14 +347,15 @@ asr-transcription/
 │   ├── 09-attribution.md     # full third-party attribution
 │   └── 10-commands.md        # command cheat sheet (bash + PowerShell)
 ├── scripts/
+│   ├── extract_subs.py       # embedded text subtitles, same JSON + MD schema
 │   ├── transcribe.py         # transcription, JSON + MD
 │   ├── batch_transcribe.py   # serial batch runner
 │   ├── qc_check.py           # validation + four coarse metrics + three checks
 │   └── check_env.py          # read-only environment check
-├── tests/                    # three zero-dependency suites, 1028 assertions
+├── tests/                    # four zero-dependency suites, 1222 assertions
 └── docs/
     ├── 转写经验_通用版.md      # the original long-form notes; references win on conflict
-    ├── 字幕识别与OCR_调研与设计.md  # unimplemented design: three routes, measurements, red-line conflicts
+    ├── 字幕识别与OCR_调研与设计.md  # three routes and measurements; the track part shipped as v0.6
     └── 参考项目评估_native-subtitle-quote-image.md  # upstream evaluation: band detection, frame diffing
 ```
 
@@ -334,20 +367,22 @@ Three loading levels: `name` + `description` always resident → `SKILL.md` on t
 
 ```powershell
 python -m compileall -q scripts tests
-python tests/run_smoke.py            # QC contract: 33 inputs x text/JSON
+python tests/run_smoke.py            # QC contract: 36 inputs x text/JSON
 python tests/run_transcribe_unit.py  # fallback decision, timing semantics, atomic output
 python tests/run_batch_unit.py       # batch planning, skip rule, end-to-end
+python tests/run_subs_unit.py        # subtitle parsing, track choice, sidecar fallback
 ```
 
 Actual output (2026-11-06):
 
 ```text
-33 cases x (text + --json), 883 assertions, 0 failures.
+36 cases x (text + --json), 998 assertions, 0 failures.
 43 assertions, 0 failures.
 102 assertions, 0 failures.
+79 assertions, 0 failures.
 ```
 
-None of the three needs network, a model, a GPU, or ffmpeg. The batch end-to-end case drives `main()` with a fake `transcribe.py`, covering success, failure, skipping, retry after a fix, and half-written artefacts.
+None of the four needs network, a model, a GPU, or ffmpeg. The batch end-to-end case drives `main()` with a fake `transcribe.py`, covering success, failure, skipping, retry after a fix, and half-written artefacts; the subtitle suite points `ffprobe` at a missing binary to prove a sidecar still produces a transcript without a probe.
 
 ### The "false green" trap on Windows
 
@@ -410,8 +445,8 @@ A: Not directly. Run `ffmpeg -i in.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le out.wa
 
 ### Capability boundaries
 
-- **Segment-level timestamps only.** No word-level `words`, no speaker diarisation, no direct SRT / VTT export.
-- **No subtitle extraction.** Neither subtitle tracks nor on-screen text are read; video is transcribed from its audio track only. The feasibility study, measurements and implementation plan live in [`docs/字幕识别与OCR_调研与设计.md`](docs/字幕识别与OCR_调研与设计.md) — **not implemented**.
+- **Segment-level timestamps only.** No word-level `words`, no speaker diarisation, no direct SRT / VTT export (the `.srt` written by `extract_subs.py` is the source track, not generated by transcription).
+- **Text subtitle tracks only, no on-screen OCR.** `extract_subs.py` reads a sidecar `.srt/.ass/.ssa/.vtt` or an embedded **text** track (no inference, `engine=subtitle-track`). **Bitmap tracks (PGS/VobSub/DVB) and burned-in subtitles are not supported** — bitmap tracks are refused with a "needs OCR" message, and burned-in text is still in the design stage, see [`docs/字幕识别与OCR_调研与设计.md`](docs/字幕识别与OCR_调研与设计.md).
 - **Single-file failures leave no artefact.** Calling `transcribe.py` directly on a failing input produces nothing; only the exit code tells you. Batch covers it (`_batch/summary.json` records exit code and error tail); the single-file case is still C4 in `ROADMAP.md`.
 - **No accuracy claims.** Without a human reference there is no number. That is a rule, not modesty.
 - **SenseVoice is a second opinion only.** Its output has no usable timestamps, and it is clearly weaker on mixed Chinese/English proper nouns. It cannot produce a final transcript alone.
